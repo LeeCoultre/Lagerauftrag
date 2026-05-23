@@ -9,6 +9,7 @@ import DynamicIsland from './components/DynamicIsland.jsx';
 import { useExperiment } from './utils/experiments';
 import { CommandPalette } from './components/CommandPalette.jsx';
 import { T } from './components/ui';
+import { BetaDesignProvider } from './hooks/useBetaDesign';
 
 /* Stale-deploy resilience for code-split chunks.
    When Railway redeploys, old chunk filenames are deleted. A tab
@@ -99,10 +100,12 @@ export default function App() {
   // 1Hz tick / connection probe) until the user has explicitly enabled it.
   const [islandEnabled] = useExperiment('dynamicIsland');
   return (
-    <AppStateProvider>
-      <Router />
-      {islandEnabled && <DynamicIsland />}
-    </AppStateProvider>
+    <BetaDesignProvider>
+      <AppStateProvider>
+        <Router />
+        {islandEnabled && <DynamicIsland />}
+      </AppStateProvider>
+    </BetaDesignProvider>
   );
 }
 

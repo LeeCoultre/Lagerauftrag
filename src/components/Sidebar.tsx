@@ -23,6 +23,7 @@ import { useMyShift } from '@/hooks/useMyShift.js';
 import { Mark } from './Logo.jsx';
 import { T } from './ui.jsx';
 import { UserSwitcher } from './UserSwitcher.jsx';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 const SIZES = { expanded: 248, collapsed: 60 };
 // eslint-disable-next-line react-refresh/only-export-components -- shared layout constant
@@ -101,10 +102,35 @@ export function Sidebar({ route, onRoute, onOpenCommand }) {
   const me = useMe().data;
   const [collapsed, setCollapsed] = useCollapsedSidebar();
   const groups = buildGroups({ current, queue, history, me });
+  const { beta } = useBetaDesign();
+
+  const width = collapsed ? SIZES.collapsed : SIZES.expanded;
 
   return (
-    <aside style={{
-      width: collapsed ? SIZES.collapsed : SIZES.expanded,
+    <aside style={beta ? {
+      /* Beta island sidebar — clean white floating panel on top of the
+         page-level paper bg. 12px gap on all sides, rounded corners,
+         subtle border + soft elevation. The `--sidebar-width` CSS var
+         (set by the collapsed hook) covers only the body width —
+         AppShell adds extra left padding for the floating gap so
+         content doesn't slide under the island. */
+      position: 'fixed',
+      top: 12,
+      left: 12,
+      bottom: 12,
+      width,
+      background: '#FFFFFF',
+      border: `1px solid ${T.border.subtle}`,
+      borderRadius: 24,
+      boxShadow: '0 6px 20px -8px rgba(15, 23, 42, 0.05), 0 1px 3px -1px rgba(15, 23, 42, 0.03)',
+      display: 'flex',
+      flexDirection: 'column',
+      zIndex: 20,
+      fontFamily: T.font.ui,
+      transition: 'width 240ms cubic-bezier(0.16, 1, 0.3, 1)',
+      overflow: 'hidden',
+    } : {
+      width,
       height: '100vh',
       position: 'sticky',
       top: 0,

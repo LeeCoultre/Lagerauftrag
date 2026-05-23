@@ -192,7 +192,7 @@ export function sortPallets(pallets) {
 /* ─── Pallet stats / heuristics ─────────────────────────────────────────── */
 
 const PALLET_VOL_M3   = 1.59;                 // SOP soft limit
-const PALLET_VOL_CM3  = PALLET_VOL_M3 * 1e6;
+export const PALLET_VOL_CM3  = PALLET_VOL_M3 * 1e6;
 const PALLET_WEIGHT_KG = 700;                  // SOP soft limit
 const TARA_KG         = 0.4;                   // Karton tara (corrugated + tape)
 const PACK_COEFF      = 1.125;                 // Packing slack inside the carton
@@ -748,27 +748,26 @@ export function primaryLevel(items) {
   return parseInt(sorted[0][0], 10);
 }
 
-/* ─── Einzelne-SKU distribution (V2) ─────────────────────────────────────
+/* ─── Einzelne-SKU distribution (V3 — water-fill) ────────────────────────
    SOP v1.1 — Phase 2 placement after Mixed-Boxes are fixed by Auftrag plan.
+
+   Placement rule (2026-05-21 rewrite): ESKU groups go onto the pallet
+   with the LOWEST current volume among eligible pallets. The natural
+   emergent behaviour balances pallets — once the chosen pallet's volume
+   exceeds the next-lowest, the next-lowest becomes the new target for
+   subsequent groups. No artificial caps; no scoring tie-breakers steer
+   the choice (they only annotate placementMeta for UI transparency).
 
    Hard constraints (block placement):
      H1-H4: violatesLevelOrder — a level-X carton cannot sit on a pallet
-            whose existing items have any level Y > X.
+            whose existing items have any level Y > X (with relaxations
+            for L7 Tacho, L4-on-L5 Klebeband, and pallets < 70% full).
      H7:    pallet.hasFourSideWarning → Single-SKU pallet, excluded.
 
    Soft (annotated, never block):
      OVERLOAD-W — pallet weight + carton.weight > 700 kg
      OVERLOAD-V — pallet volume + carton.volume > 1.59 m³
-
-   Score (Sweet-Spot 85% retained as tie-breaker; bonuses dominate):
-     +50000  useItem-Match   — same EAN/X-Code in `useItem` field
-     +10000  Format-Match    — same rollen + dim signature
-     + 3000  Brand-Match     — same HEIPA/VEIT/SWIPARO etc.
-     + 1000  FNSKU-Match     — same FNSKU already on pallet (SOP S2)
-     +  500  Level-Match     — same level already on pallet (SOP S3)
-     -10000  Mono-Level conflict — pallet has only level X, carton is Y≠X
-     -  200  Multi-Level mismatch — pallet has multiple levels, none match
-     +  ≤100 fillScore       — sweet-spot 85% tightness (geometric)
+     OVERLOAD-CAP — capacity fraction (cartons / palletLoadMax) > 1.0
 
    NO_VALID_PLACEMENT: if no pallet passes H1+H7, the carton is assigned
    to the "least bad" pallet (min absolute violations) and flagged for
@@ -806,46 +805,37 @@ export function distributeEinzelneSku(pallets, einzelneSkuItems) {
     // Phase 2: enrich + sort ESKU
     const entries = einzelneSkuItems.map(enrichEsku);
 
-    // Group by FNSKU, then sort: level ASC, group size DESC (large first)
+    // Group by FNSKU (atomic unit — SOP "ACHTUNG! Jeder Karton ...
+    // Kartonnummer": one shipment of N cartons on ONE pallet).
     const groups = new Map();
     for (const e of entries) {
       const key = e.item.fnsku || e.item.sku || e.item.title;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(e);
     }
+    // Sort: level ASC (lower levels placed first — they're the base of
+    // the stack), then total group volume DESC (largest groups placed
+    // first so the smaller groups can fine-tune balance afterwards).
     const orderedGroups = Array.from(groups.values()).sort((a, b) => {
       const la = a[0].level, lb = b[0].level;
       if (la !== lb) return la - lb;
-      return b.length - a.length;
+      const volA = a.reduce((s, e) => s + e.volCm3 * Math.max(1, e.cartons || 1), 0);
+      const volB = b.reduce((s, e) => s + e.volCm3 * Math.max(1, e.cartons || 1), 0);
+      return volB - volA;
     });
-
-    // Tracks ESKU pressure per pallet across the WHOLE distribution
-    // pass — keys the balance-mode caps in pickPalletBalanced.
-    const eskuAddedThisPass = new Map();
 
     for (const group of orderedGroups) {
       for (const e of group) {
-        // ATOMIC PLACEMENT — an ESKU FNSKU is one indivisible unit. The
-        // Lagerauftrag's "ACHTUNG! Jeder Karton ... Kartonnummer" line
-        // names ONE shipment of N cartons that must arrive on ONE pallet
-        // (warehouse SOP). Picking once for the whole group, never
-        // splitting, also means the same SPLIT-GROUP flag never fires.
+        // ATOMIC PLACEMENT — whole FNSKU group lands on the lowest-volume
+        // eligible pallet. After this insertion, ps.volCm3 grows; the
+        // next group naturally targets whichever pallet is now lowest
+        // (water-fill / level-pour). NO_VALID_PLACEMENT fallback only
+        // fires when no pallet passes H1-H4 + H7.
         const totalCartons = Math.max(1, e.cartons || 1);
-        // Try balance-mode first; fall back to existing atomic logic
-        // when the group is too big, format-unfamiliar, or caps exhausted.
-        const result =
-          pickPalletBalanced(e, states, totalCartons, eskuAddedThisPass) ??
-          pickPalletAtomic(e, states, totalCartons);
+        const result = pickPalletBalanced(e, states, totalCartons);
         const target = result.target;
         for (let i = 0; i < totalCartons; i++) target.add(e);
         const pid = target.pallet.id;
-        // Book this placement against the pass-cap so subsequent groups
-        // see the right pressure on this pallet.
-        const prev = eskuAddedThisPass.get(pid) ?? { cartons: 0, volCm3: 0 };
-        eskuAddedThisPass.set(pid, {
-          cartons: prev.cartons + totalCartons,
-          volCm3:  prev.volCm3  + totalCartons * e.volCm3,
-        });
         if (result.flags.includes('NO_VALID_PLACEMENT')) noValidCount += 1;
 
         byPalletId[pid].push({
@@ -1037,11 +1027,6 @@ function buildPalletState(p) {
   // Capacity tracking — { formatKey: cartons }, plus per-key max
   const formatCounts = {};
   const formatMax = {};
-  // Mixed-only format index — drives the ESKU balance-mode cap below.
-  // ESKU placements deliberately don't extend these maps: the cap is
-  // anchored to ORIGINAL Mixed content, not to ESKU that already landed.
-  const mixedFormatPerEinheit = new Map();  // formatSig → per-Einheit vol (cm³)
-  const mixedFormatTotalVol   = new Map();  // formatSig → total vol on pallet (cm³)
 
   for (const it of p.items || []) {
     const vol = itemTotalVolumeCm3(it);
@@ -1049,16 +1034,6 @@ function buildPalletState(p) {
     volCm3 += vol;
     weightKg += wgt;
     formats.add(formatSig(it));
-    if (!it.isEinzelneSku) {
-      const sig = formatSig(it);
-      const u = it.units || 0;
-      if (u > 0) {
-        // per-Einheit is constant within a formatSig (rollen + dim identical),
-        // so re-writing the same value is harmless. Total vol accumulates.
-        mixedFormatPerEinheit.set(sig, vol / u);
-        mixedFormatTotalVol.set(sig, (mixedFormatTotalVol.get(sig) ?? 0) + vol);
-      }
-    }
     const lvl = getDisplayLevel(it);
     levels.add(lvl);
     byLevel[lvl].push({
@@ -1109,7 +1084,6 @@ function buildPalletState(p) {
     volCm3, weightKg,
     formats, levels, brands, useItemIds, fnskus,
     formatCounts, formatMax,
-    mixedFormatPerEinheit, mixedFormatTotalVol,
     byLevel,
     overloadFlags,
     fillPct: volCm3 / PALLET_VOL_CM3,
@@ -1312,177 +1286,64 @@ function scorePallet(carton, ps) {
   return { score, breakdown };
 }
 
-/* ─── Balance-mode placement ───────────────────────────────────────────
-   SOP rule (2026-05-15, revised after seeing real warehouse data):
-   Balance pallet fill % as the primary criterion. ESKU groups go onto
-   the LEAST-LOADED pallet that passes hard constraints, with format-
-   match / useItem-match etc. acting only as tie-breakers via scorePallet.
+/* ─── Water-fill placement (V3, 2026-05-21) ────────────────────────────
+   Pure level-pour: the ESKU group goes to the eligible pallet with the
+   LOWEST current volume. After each placement that pallet rises; the
+   next group naturally targets whichever pallet is now lowest. This
+   produces an even fill across all eligible pallets without artificial
+   caps, format-match priority, or scoring tie-breakers steering the
+   placement.
 
-   Sanity-brake cap per pallet per pass:
-     • ≤ 7 ESKU cartons added
-     • added volume ≤ 7 × per-Einheit vol of the pallet's dominant Mixed
-       format (skipped when pallet has no Mixed items — no anchor)
+   `scorePallet` is still called — but only to populate the breakdown
+   shown in placementMeta (Pruefen popover / Focus tooltips). It does
+   NOT influence which pallet wins; only ps.volCm3 does.
 
-   When the least-loaded pallet has cap exhausted, the next-least-loaded
-   is tried; falls through until either a pallet accepts or no pallet
-   passes both hard constraints + cap → returns null and caller uses
-   the existing `pickPalletAtomic`.
+   Ties (two eligible pallets at exactly the same volume): break by
+   scorePallet so the more "compatible" pallet wins among equals. In
+   practice this only matters at the very first placement (two empty
+   pallets); afterwards volumes diverge by the carton volume itself.
 
-   Metric is `fillPct = volCm3 / PALLET_VOL_CM3` — currently equivalent
-   to absolute volCm3 since all pallets are 1.59 m³, but future-proof
-   for mixed-size pallets.
-
-   Hard-constraint relaxation that makes this useful in practice: L7
-   Tacho no longer blocks lower-level ESKU (see violatesLevelOrder). */
-function pickPalletBalanced(carton, states, totalCartons, eskuAddedThisPass) {
-  // Atomic groups bigger than the cap can never satisfy balance rules.
-  if (totalCartons > 7) return null;
-
-  const groupVol = carton.volCm3 * totalCartons;
-
-  let best: typeof states[number] | null = null;
-  let bestFill = Infinity;
-  let bestScore = -Infinity;
-  let bestBreakdown: Record<string, boolean | number> | null = null;
-
-  for (const ps of states) {
-    if (!passesHardConstraints(carton, ps)) continue;
-
-    // Per-pallet per-pass cap (sanity brake, prevents one pallet absorbing
-    // all ESKU in a 1.5 m³ slug at once).
-    const added = eskuAddedThisPass.get(ps.pallet.id) ?? { cartons: 0, volCm3: 0 };
-    if (added.cartons + totalCartons > 7) continue;
-
-    // Dominant Mixed format = the one with the largest total volume on
-    // this pallet right now. Its per-Einheit vol × 7 sets the volume cap.
-    // Pallets without Mixed items skip the volume cap (only carton cap).
-    let dominantPerE = 0;
-    let dominantTotal = -1;
-    for (const [sig, total] of ps.mixedFormatTotalVol) {
-      if (total > dominantTotal) {
-        dominantTotal = total;
-        dominantPerE = ps.mixedFormatPerEinheit.get(sig) ?? 0;
-      }
-    }
-    if (dominantPerE > 0) {
-      const volumeCap = dominantPerE * 7;
-      if (added.volCm3 + groupVol > volumeCap) continue;
-    }
-
-    // Balance primary; scorePallet (format-match, useItem, brand…) ties.
-    const fillPct = ps.volCm3 / PALLET_VOL_CM3;
-    const { score, breakdown } = scorePallet(carton, ps);
-    if (
-      fillPct < bestFill ||
-      (fillPct === bestFill && score > bestScore)
-    ) {
-      bestFill = fillPct;
-      bestScore = score;
-      best = ps;
-      bestBreakdown = { ...breakdown, balanceMode: true };
-    }
-  }
-
-  if (best === null) return null;
-
-  const overload = predictOverloadGroup(carton, best, totalCartons);
-  return {
-    target: best,
-    score: bestScore,
-    breakdown: bestBreakdown,
-    overload,
-    flags: [...overload],
-  };
-}
-
-/* Returns { target, score, breakdown, overload, flags }. Always returns
-   a target — falls back to least-bad NO_VALID_PLACEMENT if hard fails. */
-/* Atomic placement for an entire ESKU group (N cartons, one FNSKU).
-   Picks ONE pallet for all N cartons — the group is never split.
-
-   Selection rules (per warehouse SOP, 2026-05-14):
-     1. Filter by hard constraints (H1-H7).
-     2. Prefer pallets where ALL N cartons fit without overflow (weight
-        AND volume soft limits respected).
-     3. Within that, prefer pallets that ALREADY hold the same format
-        (format-match wins over neutral) — same X×Y on the same pallet
-        is the SOP optimum for stacking and label adherence.
-     4. Among format-match candidates, score via scorePallet
-        (useItem/brand/FNSKU/level tie-breakers) and free-volume.
-     5. If no format-match candidate exists, fall back to LEAST-FILLED
-        pallet (max remaining capacity) so the heaviest group lands on
-        the emptiest available pallet.
-     6. If no pallet passes hard constraints, mark NO_VALID_PLACEMENT
-        on the least-bad pallet (same fallback as the per-carton path).
-
-   Returns the same shape as pickPallet so the placement loop is
-   structurally identical. */
-function pickPalletAtomic(carton, states, totalCartons) {
-  const groupWeight = carton.weightKg * totalCartons;
-  const groupVol    = carton.volCm3   * totalCartons;
-
+   Returns { target, score, breakdown, overload, flags }. Always returns
+   a target — falls back to least-bad NO_VALID_PLACEMENT if every pallet
+   fails hard constraints. */
+function pickPalletBalanced(carton, states, totalCartons) {
   const eligible = states.filter((ps) => passesHardConstraints(carton, ps));
 
   if (eligible.length > 0) {
-    // Pass 1 — pallets that swallow the WHOLE group without overflow.
-    const noOverflow = eligible.filter((ps) =>
-      (ps.weightKg + groupWeight) <= PALLET_WEIGHT_KG &&
-      (ps.volCm3   + groupVol)    <= PALLET_VOL_CM3
-    );
-    const candidates = noOverflow.length > 0 ? noOverflow : eligible;
+    let best: typeof eligible[number] = eligible[0];
+    let bestVol = best.volCm3;
+    let bestScore = scorePallet(carton, best).score;
 
-    // Pass 2 — among capacity-fit candidates, partition by format match.
-    // Format match = same X×Y rolle/dim signature already on the pallet.
-    const formatMatch = candidates.filter((ps) =>
-      ps.formats.has(carton.formatSig)
-    );
-
-    let best: typeof eligible[number] | null = null;
-    let bestScore = -Infinity;
-    let bestFree = -Infinity;
-    let bestBreakdown: Record<string, boolean | number> | null = null;
-
-    if (formatMatch.length > 0) {
-      // Score within format-match group — useItem / brand / FNSKU /
-      // sweet-spot still differentiate ties between same-format pallets.
-      for (const ps of formatMatch) {
-        const { score, breakdown } = scorePallet(carton, ps);
-        const free = PALLET_VOL_CM3 - ps.volCm3;
-        if (score > bestScore || (score === bestScore && free > bestFree)) {
-          bestScore = score;
-          bestFree = free;
+    for (let i = 1; i < eligible.length; i++) {
+      const ps = eligible[i];
+      const vol = ps.volCm3;
+      if (vol < bestVol) {
+        best = ps;
+        bestVol = vol;
+        bestScore = scorePallet(carton, ps).score;
+      } else if (vol === bestVol) {
+        const s = scorePallet(carton, ps).score;
+        if (s > bestScore) {
           best = ps;
-          bestBreakdown = breakdown;
-        }
-      }
-    } else {
-      // Pass 3 — no format match: route the whole group to the
-      // LEAST-FILLED pallet so we don't pile onto an already-busy one.
-      for (const ps of candidates) {
-        const free = PALLET_VOL_CM3 - ps.volCm3;
-        if (free > bestFree) {
-          bestFree = free;
-          best = ps;
-          bestScore = scorePallet(carton, ps).score;
-          bestBreakdown = scorePallet(carton, ps).breakdown;
+          bestScore = s;
         }
       }
     }
 
-    // overload prediction uses GROUP totals so the warning reflects the
-    // real impact of dropping N cartons in one go.
+    const { score, breakdown } = scorePallet(carton, best);
     const overload = predictOverloadGroup(carton, best, totalCartons);
     return {
       target: best,
-      score: bestScore,
-      breakdown: bestBreakdown,
+      score,
+      breakdown: { ...breakdown, balanceMode: true },
       overload,
       flags: [...overload],
     };
   }
 
-  // No pallet passes hard — least-bad fallback (same shape as
-  // per-carton path). NO_VALID_PLACEMENT will surface in the UI.
+  // No pallet passes hard constraints — NO_VALID_PLACEMENT on the
+  // least-bad pallet (H7 worst, then level-order violation, then
+  // fill-pct tie-break). UI surfaces this for manual escalation.
   let best = states[0];
   let leastViolations = Infinity;
   for (const ps of states) {

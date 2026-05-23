@@ -23,7 +23,7 @@
      Components read these via T.bg.page → var(--bg-page) etc., so a
      dark-theme override in [data-theme="dark"] below repaints the whole
      UI without a single React re-render. */
-  --bg-page:        #F9FAFB;
+  --bg-page:        #F4F5F9;
   --bg-surface:     #FFFFFF;
   --bg-surface-2:   #F9FAFB;
   --bg-surface-3:   #F3F4F6;
@@ -250,8 +250,67 @@ a { color: inherit; text-decoration: none; }
   animation: mr-pallet-wipe 600ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* ─── Hero card: item-transition lift ─────────────────────────────────
+   Fires on every article change in Focus mode. Brief scale+lift so the
+   worker has a tactile cue that a new article landed, without slowing
+   their throughput. */
+@keyframes mr-hero-land {
+  from { opacity: 0; transform: translateY(6px) scale(0.992); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.mr-hero-land {
+  animation: mr-hero-land 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Smart-hint slide — context line that switches as the worker moves.
+   The hint container animates the value swap so the meaning of the line
+   is unmistakable. */
+@keyframes mr-hint-swap {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.mr-hint-swap { animation: mr-hint-swap 260ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* ─── Beta design — Outfit font ───────────────────────────────────────
+   Applied globally via [data-beta="1"] on any ancestor. Hero card and
+   compact rows in beta mode use Outfit instead of Inter. JetBrains Mono
+   stays the monospace family. */
+[data-beta="1"] {
+  font-family: 'Outfit', 'Inter', system-ui, -apple-system, sans-serif;
+}
+[data-beta="1"] h1,
+[data-beta="1"] h2,
+[data-beta="1"] h3,
+[data-beta="1"] button,
+[data-beta="1"] input,
+[data-beta="1"] textarea,
+[data-beta="1"] select {
+  font-family: inherit;
+}
+
+/* Live-pulse dot — used next to the position / timer to indicate the
+   pallet is being actively worked on. Slow, ambient. */
+@keyframes mr-live-dot {
+  0%, 100% { box-shadow: 0 0 0 0   var(--accent-soft, rgba(255,91,31,0.3)); }
+  50%      { box-shadow: 0 0 0 5px transparent; }
+}
+.mr-live-dot { animation: mr-live-dot 1.8s ease-in-out infinite; }
+
+/* Flow-mode promote — the next-up compact row plays this as it shifts
+   into the hero slot when the worker advances. Brief scale-pop + lift,
+   then settles to its new resting Y offset. */
+@keyframes mr-flow-promote {
+  0%   { transform: translateY(0)     scale(1);    opacity: 1; }
+  40%  { transform: translateY(-10px) scale(1.025); opacity: 1; }
+  100% { transform: translateY(-14px) scale(1);    opacity: 1; }
+}
+.mr-flow-promote {
+  animation: mr-flow-promote 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .mr-rise, .mr-pulse, .mr-finale-burst, .mr-pallet-wipe, .mr-recopy-flash { animation: none !important; }
+  .mr-rise, .mr-pulse, .mr-finale-burst, .mr-pallet-wipe, .mr-recopy-flash,
+  .mr-hero-land, .mr-hint-swap, .mr-live-dot, .mr-flow-promote { animation: none !important; }
   @keyframes keynote-slide-in {
     from { opacity: 0; }
     to   { opacity: 1; }

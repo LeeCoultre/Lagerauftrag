@@ -14,6 +14,7 @@
 import { Sidebar, SIDEBAR_WIDTH } from './Sidebar.jsx';
 import { useAppState } from '@/state.jsx';
 import { T } from './ui.jsx';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 const STEP_LABEL = {
   upload:    'Upload',
@@ -26,11 +27,12 @@ const STEP_LABEL = {
 const PILL_SUPPRESSED = new Set(['workspace', 'warteschlange']);
 
 export function AppShell({ route, onRoute, onOpenCommand, children }) {
+  const { beta } = useBetaDesign();
   return (
     <div style={{
       display: 'flex',
       minHeight: '100vh',
-      background: 'var(--bg)',
+      background: beta ? 'var(--bg-page)' : 'var(--bg)',
       alignItems: 'stretch',
     }}>
       <Sidebar route={route} onRoute={onRoute} onOpenCommand={onOpenCommand} />
@@ -38,7 +40,10 @@ export function AppShell({ route, onRoute, onOpenCommand, children }) {
         flex: 1,
         minWidth: 0,
         position: 'relative',
-        marginLeft: 0,    /* sidebar already takes its space */
+        /* When the sidebar floats as a beta island it leaves the flex
+           flow → reserve its width + 24px (12px island margin + 12px
+           gap to content) on the left so content doesn't tuck under it. */
+        marginLeft: beta ? 'calc(var(--sidebar-width) + 24px)' : 0,
       }}>
         {children}
       </div>
