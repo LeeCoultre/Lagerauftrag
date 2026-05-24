@@ -32,7 +32,7 @@ export function AppShell({ route, onRoute, onOpenCommand, children }) {
     <div style={{
       display: 'flex',
       minHeight: '100vh',
-      background: beta ? 'var(--bg-page)' : 'var(--bg)',
+      background: beta ? 'var(--bg-gradient)' : 'var(--bg)',
       alignItems: 'stretch',
     }}>
       <Sidebar route={route} onRoute={onRoute} onOpenCommand={onOpenCommand} />

@@ -1,30 +1,28 @@
 /* Abschluss — Schritt 04. Auftrag-Bilanz mit drei kopierbaren Schlüsselzahlen.
 
-   Visual ethos shared with Upload + Pruefen + Focus:
-     • Topbar (breadcrumb + status pulse + Schließen)
-     • StepperBar at top with active=abschluss
-     • main maxWidth 1180, padding 40 32 120, gap 32
-     • Plain bordered cards (T.bg.surface, 1px hairline, soft shadow)
-     • Subtle accent halo on the hero card
+   Two variants, switched by `useBetaDesign`:
 
-   Hero exposes the three facts the worker needs after wrap-up:
-     1. FBA-Code        — paste into shipping system / driver paperwork
-     2. Gewicht gesamt  — paste onto the load list
-     3. Summe (EUR)     — invoicing / accounting
-   All three are click-to-copy with a subtle "Kopiert" flash. Below
-   the hero, an Aufschlüsselung breakdown explains where the sum
-   comes from (per-level: count × price/Pal).
+   • Classic (default): the pre-beta full-page layout — Topbar with
+     breadcrumbs, StepperBar, HeroCard with halo, Aufschlüsselung table,
+     Bilanz KPI cards, Pallet timings + Level distribution, sticky
+     bottom action bar. Unchanged.
 
-   Pricing model (from the warehouse clipboard):
+   • Beta: stripped-down, focused on what the worker actually needs at
+     the end — three copyable totals (FBA, Gewicht, Summe) + a clean
+     Aufschlüsselung. Drops the duplicate KPI cards (already shown in
+     BetaFinale), the per-pallet timing chart and the level pie. Reuses
+     the FlowHero / BetaInterlude / BetaFinale design grammar: paper
+     #F4F5F7 outer card + 2px white rim + halo + nested white panels +
+     accent action pill.
+
+   Pricing model (same in both modes, from the warehouse clipboard):
      • Rollen     — L1 Thermorollen + L2 Veit + L3 ÖKO + L7 Tachorollen
                     → 1.500 EUR / Pal · 700 kg / Pal
      • Produktion — L4 Klebeband + L5 Produktion + L6 Kernöl
                     →   500 EUR / Pal · 250 kg / Pal
-   Both price AND weight are FIXED per pallet (independent of actual
-   sku_dimensions data) so the load list always matches accounting.
 */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useAppState } from '@/state.jsx';
 import {
   pruefenView, palletTimingRows, levelDistribution,
@@ -35,6 +33,7 @@ import {
   Card, SectionHeader, Eyebrow, PageH1, Lead,
   Badge, Button, Kpi, T,
 } from '@/components/ui.jsx';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 /* Two pallet categories with fully fixed weight + price per pallet.
    The Rollen family (thermal rolls of any kind, plus the Tacho cap)
@@ -48,8 +47,11 @@ function rateForLevel(lvl) {
   return ROLLEN_LEVELS.has(lvl) ? RATE_ROLLEN : RATE_PRODUKTION;
 }
 
-/* ════════════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════════════
+   Top-level router — picks classic vs beta based on the design flag.
+   ════════════════════════════════════════════════════════════════════════ */
 export default function AbschlussScreen() {
+  const { beta } = useBetaDesign();
   const { current, queue, completeAndAdvance, cancelCurrent, goToStep } = useAppState();
 
   const data = useMemo(() => {
@@ -86,7 +88,7 @@ export default function AbschlussScreen() {
   if (!data) {
     return (
       <Page>
-        <Topbar crumbs={[{ label: 'Abschluss' }]} />
+        {!beta && <Topbar crumbs={[{ label: 'Abschluss' }]} />}
         <main style={{ padding: '64px 32px', textAlign: 'center', color: T.text.subtle }}>
           Kein Auftrag im Abschluss.
         </main>
@@ -94,6 +96,29 @@ export default function AbschlussScreen() {
     );
   }
 
+  if (beta) {
+    return (
+      <BetaAbschluss
+        data={data}
+        onSaveAndNext={onSaveAndNext}
+      />
+    );
+  }
+
+  return (
+    <ClassicAbschluss
+      data={data}
+      onSaveAndNext={onSaveAndNext}
+      onExit={onExit}
+      goToStep={goToStep}
+    />
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CLASSIC — pre-beta layout, unchanged.
+   ════════════════════════════════════════════════════════════════════════ */
+function ClassicAbschluss({ data, onSaveAndNext, onExit, goToStep }) {
   return (
     <Page>
       <Topbar
@@ -196,7 +221,601 @@ export default function AbschlussScreen() {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   HERO CARD — FBA + Weight + Sum.
+   BETA — focused finale page with the new design grammar.
+   ════════════════════════════════════════════════════════════════════════ */
+function BetaAbschluss({ data, onSaveAndNext }) {
+  /* Space / Enter triggers the primary action (Nächster / Zum Workspace),
+     mirroring the BetaFinale gate so the worker can keep their hands on
+     the keyboard through the whole post-Focus flow. */
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        const tag = (e.target as HTMLElement)?.tagName?.toUpperCase?.();
+        if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'TEXTAREA') return;
+        e.preventDefault();
+        onSaveAndNext();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onSaveAndNext]);
+
+  const { fba, destination, format, bilanz, stats, queueRemaining } = data;
+
+  return (
+    <Page>
+      <main style={{
+        maxWidth: 880,
+        margin: '0 auto',
+        padding: '48px 32px 140px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        fontFamily: T.font.ui,
+      }}>
+        {/* HERO — identity + metrics, two stacked white panels inside
+            a paper-grey outer card. */}
+        <BetaPaperCard>
+          <BetaWhitePanel padding="28px 30px">
+            <BetaEyebrow
+              color={T.status.success.text}
+              icon={<BetaCheckIcon />}
+            >
+              Auftrag abgeschlossen
+            </BetaEyebrow>
+
+            <BetaBigCopy
+              value={fba}
+              rawValue={fba}
+              ariaLabel="FBA-Code"
+            />
+
+            <div style={{
+              marginTop: 14,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+              fontFamily: T.font.mono,
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: T.text.subtle,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+            }}>
+              <span style={{ color: T.text.faint }}>Ziel</span>
+              {destination ? (
+                <BetaMetaCopy value={destination} />
+              ) : (
+                <span style={{ color: T.text.faint }}>—</span>
+              )}
+              <BetaMetaDot />
+              <span>{(format || 'standard').toString().toUpperCase()}</span>
+              <BetaMetaDot />
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                {stats.palletCount} Pal · {stats.articles} Art
+              </span>
+            </div>
+          </BetaWhitePanel>
+
+          <BetaWhitePanel padding="22px 26px">
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: 16,
+            }}>
+              <BetaMetric
+                label="Gewicht"
+                value={formatKg(bilanz.totalWeight)}
+                rawValue={String(Math.round(bilanz.totalWeight))}
+              />
+              <BetaMetric
+                label="Summe"
+                value={formatEur(bilanz.totalSum)}
+                rawValue={String(bilanz.totalSum)}
+              />
+              <BetaMetric
+                label="Dauer"
+                value={formatDurationShort(stats.durationSec)}
+              />
+            </div>
+          </BetaWhitePanel>
+        </BetaPaperCard>
+
+        {/* Bilanz breakdown — one paper-grey card with a white panel
+            holding the per-level rows + Summe footer. */}
+        {bilanz.breakdown.length > 0 && (
+          <BetaPaperCard>
+            <BetaWhitePanel padding="22px 26px">
+              <BetaEyebrow>Aufschlüsselung</BetaEyebrow>
+              <div style={{
+                marginTop: 14,
+                display: 'flex',
+                flexDirection: 'column',
+              }}>
+                {bilanz.breakdown.map((row, i) => (
+                  <BetaBreakdownRow
+                    key={row.level}
+                    row={row}
+                    isFirst={i === 0}
+                  />
+                ))}
+                <BetaBreakdownTotal bilanz={bilanz} />
+              </div>
+            </BetaWhitePanel>
+          </BetaPaperCard>
+        )}
+      </main>
+
+      <BetaFooterPill
+        queueRemaining={queueRemaining}
+        onAction={onSaveAndNext}
+      />
+    </Page>
+  );
+}
+
+/* ── Beta atoms ───────────────────────────────────────────────────── */
+
+function BetaPaperCard({ children }) {
+  return (
+    <div style={{
+      padding: 8,
+      background: '#F4F5F7',
+      border: '2px solid #FFFFFF',
+      borderRadius: 32,
+      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaWhitePanel({ children, padding }) {
+  return (
+    <div style={{
+      background: '#FFFFFF',
+      borderRadius: 24,
+      padding: padding || '22px 26px',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaEyebrow({ children, color, icon }) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 10.5,
+      fontWeight: 700,
+      fontFamily: T.font.mono,
+      color: color || T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.18em',
+    }}>
+      {icon}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function BetaCheckIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+      <path d="M2.5 6.5l2 2 5-5.5" stroke="currentColor" strokeWidth="2.2"
+            strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+function BetaMetaDot() {
+  return (
+    <span aria-hidden style={{
+      width: 3, height: 3, borderRadius: '50%',
+      background: 'rgba(15, 23, 42, 0.22)',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+/* Big mono FBA-code button — click to copy, brief «Kopiert» chip in
+   the corner. Sized to dominate the header panel. */
+function BetaBigCopy({ value, rawValue, ariaLabel }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = (e) => {
+    e.stopPropagation();
+    copyToClipboard(rawValue ?? String(value));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => { onClick(e); e.currentTarget.blur(); }}
+      title={copied ? 'Kopiert' : 'Klick zum Kopieren'}
+      aria-label={ariaLabel}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        marginTop: 14,
+        padding: '8px 10px',
+        marginLeft: -10,
+        background: copied ? T.status.success.bg : 'transparent',
+        borderRadius: 14,
+        transition: 'background 220ms ease',
+      }}
+    >
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 'clamp(34px, 4.4vw, 52px)',
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.primary,
+        letterSpacing: '-0.025em',
+        lineHeight: 1.04,
+        wordBreak: 'break-all',
+        transition: 'color 220ms ease',
+      }}>
+        {value}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.faint,
+        letterSpacing: '0.10em',
+        textTransform: 'uppercase',
+      }}>
+        {copied ? '✓ Kopiert' : 'Klick zum Kopieren'}
+      </span>
+    </button>
+  );
+}
+
+/* Inline meta-copy chip — for the «Ziel · DE-XYZ» row. Reads as a
+   normal mono caps span until hover; click copies. */
+function BetaMetaCopy({ value }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = () => {
+    copyToClipboard(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseDown={(e) => e.preventDefault()}
+      title={copied ? 'Kopiert' : 'Klick zum Kopieren'}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        fontFamily: T.font.mono,
+        fontSize: 11.5,
+        fontWeight: 700,
+        color: copied ? T.status.success.text : T.text.primary,
+        letterSpacing: '0.12em',
+        transition: 'color 220ms ease',
+      }}
+      onMouseEnter={(e) => { if (!copied) e.currentTarget.style.color = 'var(--accent)'; }}
+      onMouseLeave={(e) => { if (!copied) e.currentTarget.style.color = T.text.primary; }}
+    >
+      {value}
+    </button>
+  );
+}
+
+/* Single metric tile inside the 3-up metrics panel. `rawValue` is
+   optional; when present the tile is click-to-copy, otherwise it's a
+   read-only number (used for «Dauer»). */
+function BetaMetric({ label, value, rawValue }) {
+  const [copied, setCopied] = useState(false);
+  const copyable = rawValue != null;
+  const onClick = () => {
+    if (!copyable) return;
+    copyToClipboard(rawValue);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseDown={(e) => e.preventDefault()}
+      disabled={!copyable}
+      title={copyable ? (copied ? 'Kopiert' : 'Klick zum Kopieren') : undefined}
+      style={{
+        all: 'unset',
+        cursor: copyable ? 'pointer' : 'default',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '6px 8px',
+        marginLeft: -8,
+        background: copied ? T.status.success.bg : 'transparent',
+        borderRadius: 12,
+        transition: 'background 220ms ease',
+      }}
+    >
+      <span style={{
+        fontSize: 10.5,
+        fontWeight: 700,
+        fontFamily: T.font.mono,
+        color: copied ? T.status.success.text : T.text.faint,
+        textTransform: 'uppercase',
+        letterSpacing: '0.16em',
+      }}>
+        {label}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 'clamp(20px, 2.4vw, 28px)',
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        letterSpacing: '-0.018em',
+        lineHeight: 1.05,
+        transition: 'color 220ms ease',
+      }}>
+        {value}
+      </span>
+    </button>
+  );
+}
+
+interface BreakdownBucket {
+  level: number;
+  meta: { name?: string; shortName?: string; color?: string };
+  count: number;
+  sum: number;
+  weight: number;
+  pricePerPallet: number;
+}
+
+function BetaBreakdownRow({ row, isFirst }: { row: BreakdownBucket; isFirst: boolean }) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '14px minmax(120px, 1fr) auto auto auto',
+      gap: 16,
+      alignItems: 'center',
+      padding: '14px 0',
+      borderTop: isFirst ? 'none' : `1px solid ${T.border.subtle}`,
+    }}>
+      <span aria-hidden style={{
+        width: 10, height: 10,
+        borderRadius: '50%',
+        background: row.meta.color,
+      }} />
+      <span style={{
+        fontSize: 14,
+        fontWeight: 500,
+        color: T.text.primary,
+        letterSpacing: '-0.005em',
+      }}>
+        L{row.level} · {row.meta.name}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 12.5,
+        fontWeight: 500,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap',
+      }}>
+        {row.count} Pal
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 13.5,
+        fontWeight: 500,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap',
+        textAlign: 'right',
+        minWidth: 90,
+      }}>
+        {formatKg(row.weight)}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 14,
+        fontWeight: 600,
+        color: T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap',
+        textAlign: 'right',
+        minWidth: 110,
+        letterSpacing: '-0.008em',
+      }}>
+        {formatEur(row.sum)}
+      </span>
+    </div>
+  );
+}
+
+function BetaBreakdownTotal({ bilanz }) {
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '14px minmax(120px, 1fr) auto auto auto',
+      gap: 16,
+      alignItems: 'center',
+      padding: '16px 0 4px',
+      borderTop: `1px solid ${T.border.primary}`,
+      marginTop: 4,
+    }}>
+      <span aria-hidden />
+      <span style={{
+        fontFamily: T.font.ui,
+        fontSize: 14,
+        fontWeight: 700,
+        color: T.text.primary,
+        letterSpacing: '-0.005em',
+        textTransform: 'uppercase',
+      }}>
+        Summe
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 12.5,
+        fontWeight: 700,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap',
+      }}>
+        {bilanz.totalCount} Pal
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 14,
+        fontWeight: 700,
+        color: T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        textAlign: 'right',
+        minWidth: 90,
+      }}>
+        {formatKg(bilanz.totalWeight)}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 16,
+        fontWeight: 700,
+        color: 'var(--accent)',
+        fontVariantNumeric: 'tabular-nums',
+        textAlign: 'right',
+        minWidth: 110,
+        letterSpacing: '-0.012em',
+      }}>
+        {formatEur(bilanz.totalSum)}
+      </span>
+    </div>
+  );
+}
+
+/* Floating bottom pill mirroring BetaIslandBar geometry. Queue
+   indicator on the left, accent action pill on the right with a
+   translucent Space hotkey badge. */
+function BetaFooterPill({ queueRemaining, onAction }) {
+  const isMore = queueRemaining > 0;
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 18,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 50,
+      marginLeft: 'calc(var(--sidebar-width) / 2)',
+      maxWidth: 'calc(100% - 48px)',
+      background: '#F8F8F8',
+      border: '2px solid #FFFFFF',
+      borderRadius: 50,
+      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+      padding: '6px 6px 6px 22px',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 18,
+      whiteSpace: 'nowrap',
+    }}>
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        fontFamily: T.font.mono,
+        fontSize: 11.5,
+        fontWeight: 600,
+        color: T.text.subtle,
+        letterSpacing: '0.04em',
+      }}>
+        <span aria-hidden style={{
+          width: 6, height: 6,
+          borderRadius: '50%',
+          background: isMore ? T.accent.main : T.status.success.main,
+          boxShadow: `0 0 0 3px ${(isMore ? T.accent.main : T.status.success.main)}22`,
+        }} />
+        {isMore ? (
+          <span>
+            <span style={{
+              color: T.text.primary,
+              fontWeight: 700,
+              fontVariantNumeric: 'tabular-nums',
+            }}>
+              {queueRemaining}
+            </span>{' '}
+            in Warteschlange
+          </span>
+        ) : (
+          <span>Keine weiteren Aufträge</span>
+        )}
+      </span>
+
+      <button
+        type="button"
+        onClick={onAction}
+        title={isMore ? 'Nächster Auftrag (Space)' : 'Zum Workspace (Space)'}
+        style={{
+          all: 'unset',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 12,
+          padding: '10px 20px',
+          background: 'var(--accent)',
+          color: '#FFFFFF',
+          borderRadius: 50,
+          fontFamily: T.font.ui,
+          fontSize: 14,
+          fontWeight: 600,
+          letterSpacing: '-0.005em',
+          cursor: 'pointer',
+          transition: 'transform 200ms cubic-bezier(0.16, 1, 0.3, 1), filter 200ms ease',
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.transform = 'translateY(-1px)';
+          e.currentTarget.style.filter = 'brightness(1.05)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.transform = 'none';
+          e.currentTarget.style.filter = 'none';
+        }}
+      >
+        {isMore ? 'Nächster Auftrag' : 'Zum Workspace'}
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <path d="M3 7h8m0 0L7.5 3.5M11 7l-3.5 3.5" stroke="currentColor"
+                strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minWidth: 30, height: 20,
+          padding: '0 7px',
+          fontSize: 10.5,
+          fontFamily: T.font.mono,
+          fontWeight: 700,
+          color: '#FFFFFF',
+          background: 'rgba(255, 255, 255, 0.22)',
+          borderRadius: 6,
+          lineHeight: 1,
+          letterSpacing: '0.04em',
+        }}>
+          Space
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   HERO CARD — Classic only. FBA + Weight + Sum.
    Mirrors HeroFBA from Pruefen: subtle accent halo, bordered card,
    two-region body separated by a hairline. Each big value is a
    <CopyableValue> that flashes "Kopiert" on click.
@@ -252,10 +871,7 @@ function HeroCard({ data }) {
           </span>
         </div>
 
-        {/* Identity row — FBA-Code (primary) + Ziel-Code (peer, copyable).
-            Both sit on the same row above the hairline, before the
-            Weight/Sum block. Grid 1.5fr/1fr so FBA dominates while RLG1
-            still has its own copy zone. */}
+        {/* Identity row — FBA-Code (primary) + Ziel-Code (peer, copyable). */}
         <div style={{
           display: 'grid',
           gridTemplateColumns: destination ? '1.5fr 1fr' : '1fr',
@@ -278,8 +894,7 @@ function HeroCard({ data }) {
           )}
         </div>
 
-        {/* Meta line — Format + Pal/Art + duration. Destination is now
-            its own copyable block above, so we drop it from this caption. */}
+        {/* Meta line — Format + Pal/Art + duration. */}
         <div style={{
           marginTop: 10,
           fontSize: 12.5,
@@ -338,9 +953,7 @@ function HeroCard({ data }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   AUFSCHLÜSSELUNG — per-level breakdown table.
-   Each row: level chip · count · "× rate" · subtotal · weight.
-   Footer: total row in bold.
+   AUFSCHLÜSSELUNG — Classic only.
    ════════════════════════════════════════════════════════════════════════ */
 function Aufschluesselung({ bilanz }) {
   if (!bilanz.breakdown.length) return null;
@@ -433,15 +1046,6 @@ const numCell: React.CSSProperties = {
   fontVariantNumeric: 'tabular-nums',
 };
 
-interface BreakdownBucket {
-  level: number;
-  meta: { name?: string; shortName?: string; color?: string };
-  count: number;
-  sum: number;
-  weight: number;
-  pricePerPallet: number;
-}
-
 function BreakdownRow({ row }: { row: BreakdownBucket }) {
   return (
     <div style={{
@@ -505,7 +1109,7 @@ function LevelLabel({ level, meta }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   COPYABLE VALUE — big mono text, click to copy, brief flash on success.
+   COPYABLE VALUE — Classic helper. Big mono text, click to copy.
    ════════════════════════════════════════════════════════════════════════ */
 function CopyableValue({ label, value, rawValue, sublabel, variant, mono }: { label?: React.ReactNode; value?: React.ReactNode; rawValue?: string | number; sublabel?: React.ReactNode; variant?: 'default' | 'hero' | 'primary'; mono?: boolean }) {
   const [copied, setCopied] = useState(false);
@@ -616,7 +1220,7 @@ function CopyableValue({ label, value, rawValue, sublabel, variant, mono }: { la
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   PALLET TIMINGS — kept from previous design.
+   PALLET TIMINGS — Classic only.
    ════════════════════════════════════════════════════════════════════════ */
 function PalletTimings({ timings, totalSec }) {
   const maxSec = Math.max(...timings.map((t) => t.durSec), 1);
@@ -688,7 +1292,7 @@ function PalletTimings({ timings, totalSec }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   LEVELS — kept from previous design.
+   LEVELS — Classic only.
    ════════════════════════════════════════════════════════════════════════ */
 function Levels({ distribution }) {
   const total = distribution.reduce((s, d) => s + d.units, 0);
@@ -787,7 +1391,7 @@ function Levels({ distribution }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   STICKY BAR
+   STICKY BAR — Classic only.
    ════════════════════════════════════════════════════════════════════════ */
 function StickyBar({ queueRemaining, onSaveAndNext }) {
   return (

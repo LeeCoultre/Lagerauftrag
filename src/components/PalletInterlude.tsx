@@ -1,17 +1,25 @@
 // @ts-nocheck — legacy pallet-optimizer component (pre-Marathon); not in active code path
-/* PalletInterlude — minimalist pallet-completion checkpoint.
+/* PalletInterlude — pallet-completion checkpoint.
 
-   One canvas, two calm zones separated by a single hairline:
-     1. ✓ Abgeschlossen  → big pallet ID, time underneath
-     2. Nächste Palette  → next ID + count + one level-tinted dot per item
+   Two variants of the same layout, switched by the global beta-design
+   flag (see `useBetaDesign`):
 
-   The gate is still hard (Space / Enter confirms; overlay click does
-   not dismiss), the visual language is just quieter — no nested
-   surfaces, no stat dots, no row dividers around the body. */
+   • Classic (default): minimalist single-surface card, hairline
+     divider between «Abgeschlossen» and «Nächste Palette», generic
+     primary Button. Unchanged from the pre-beta design.
+
+   • Beta: paper-grey #F4F5F7 card with a 2px white rim + soft halo,
+     two nested WHITE sub-panels separating the sections, accent-tinted
+     time pill, accent-pill action button. Matches the FlowHero /
+     BetaIslandBar vocabulary.
+
+   The gate is the same in both modes: Space / Enter confirms; overlay
+   click does NOT dismiss. */
 
 import { useEffect } from 'react';
 import { Button, T } from './ui.jsx';
 import { LEVEL_META, getDisplayLevel } from '@/utils/auftragHelpers.js';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 export default function PalletInterlude({
   pallet,            // { id, itemCount, weightKg, volCm3, durationMs }
@@ -20,7 +28,9 @@ export default function PalletInterlude({
   reducedMotion = false,
   onComplete,
 }) {
+  const { beta } = useBetaDesign();
   const hints = nextHints || [];
+
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === ' ' || e.key === 'Enter') {
@@ -36,6 +46,35 @@ export default function PalletInterlude({
   const time = fmtDuration(pallet?.durationMs || 0);
   const fadeMs = reducedMotion ? 100 : 280;
 
+  if (beta) {
+    return (
+      <BetaInterlude
+        pallet={pallet}
+        nextPallet={nextPallet}
+        hints={hints}
+        time={time}
+        fadeMs={fadeMs}
+        onComplete={onComplete}
+      />
+    );
+  }
+
+  return (
+    <ClassicInterlude
+      pallet={pallet}
+      nextPallet={nextPallet}
+      hints={hints}
+      time={time}
+      fadeMs={fadeMs}
+      onComplete={onComplete}
+    />
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   CLASSIC variant — unchanged pre-beta layout.
+   ══════════════════════════════════════════════════════════════════════ */
+function ClassicInterlude({ pallet, nextPallet, hints, time, fadeMs, onComplete }) {
   return (
     <div
       style={{
@@ -62,7 +101,6 @@ export default function PalletInterlude({
           animation: `interlude-card-in ${fadeMs * 1.4}ms cubic-bezier(0.16, 1, 0.3, 1) both`,
         }}
       >
-        {/* 1 ─ ABGESCHLOSSEN ─────────────────────────────────────────── */}
         <Eyebrow color={T.status.success.text} icon={<CheckIcon />}>
           Abgeschlossen
         </Eyebrow>
@@ -96,7 +134,6 @@ export default function PalletInterlude({
 
         {nextPallet && <Hairline />}
 
-        {/* 2 ─ NÄCHSTE PALETTE ──────────────────────────────────────── */}
         {nextPallet && (
           <>
             <Eyebrow>Nächste Palette</Eyebrow>
@@ -105,7 +142,6 @@ export default function PalletInterlude({
           </>
         )}
 
-        {/* Action ─ right-aligned, no preface label */}
         <div style={{
           marginTop: 28,
           display: 'flex',
@@ -114,26 +150,177 @@ export default function PalletInterlude({
           <Button variant="primary" onClick={onComplete}
                   title="Nächste Palette starten (Space)">
             {nextPallet ? `${nextPallet.id} starten` : 'Weiter'}
-            <Kbd onPrimary>Space</Kbd>
+            <ClassicKbd onPrimary>Space</ClassicKbd>
           </Button>
         </div>
       </div>
 
-      <style>{`
-        @keyframes interlude-bg-in {
-          from { opacity: 0; }
-          to   { opacity: 1; }
-        }
-        @keyframes interlude-card-in {
-          from { opacity: 0; transform: translateY(14px) scale(0.98); }
-          to   { opacity: 1; transform: translateY(0)    scale(1); }
-        }
-      `}</style>
+      <SharedKeyframes />
     </div>
   );
 }
 
-/* ── Hairline divider — single rule, generous breathing room ───────── */
+/* ══════════════════════════════════════════════════════════════════════
+   BETA variant — matches the new bottom-bar / hero-card vocabulary.
+   ══════════════════════════════════════════════════════════════════════ */
+function BetaInterlude({ pallet, nextPallet, hints, time, fadeMs, onComplete }) {
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 800,
+        background: 'rgba(15, 23, 42, 0.32)',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 32,
+        animation: `interlude-bg-in ${fadeMs}ms cubic-bezier(0.16, 1, 0.3, 1) both`,
+      }}
+    >
+      <div
+        style={{
+          width: '100%',
+          maxWidth: 520,
+          padding: 8,
+          background: '#F4F5F7',
+          border: '2px solid #FFFFFF',
+          borderRadius: 32,
+          boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          fontFamily: T.font.ui,
+          animation: `interlude-card-in ${fadeMs * 1.4}ms cubic-bezier(0.16, 1, 0.3, 1) both`,
+        }}
+      >
+        <BetaPanel>
+          <Eyebrow color={T.status.success.text} icon={<CheckIcon />}>
+            Abgeschlossen
+          </Eyebrow>
+          <div style={{
+            marginTop: 12,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}>
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 'clamp(34px, 4.4vw, 48px)',
+              fontWeight: 600,
+              letterSpacing: '-0.025em',
+              color: T.text.primary,
+              lineHeight: 1,
+            }}>
+              {pallet?.id || '—'}
+            </span>
+            <span title={`Dauer · ${time}`} style={{
+              fontFamily: T.font.mono,
+              fontSize: 13,
+              fontWeight: 700,
+              color: 'var(--accent)',
+              letterSpacing: '0.02em',
+              fontVariantNumeric: 'tabular-nums',
+              flexShrink: 0,
+            }}>
+              {time}
+            </span>
+          </div>
+        </BetaPanel>
+
+        {nextPallet && (
+          <BetaPanel>
+            <Eyebrow>Nächste Palette</Eyebrow>
+            <NextPalletPreview pallet={nextPallet} />
+            {hints.length > 0 && <HintList hints={hints} />}
+          </BetaPanel>
+        )}
+
+        <div style={{
+          padding: '4px 8px 8px',
+          display: 'flex',
+          justifyContent: 'flex-end',
+        }}>
+          <button
+            type="button"
+            onClick={onComplete}
+            title="Nächste Palette starten (Space)"
+            style={{
+              all: 'unset',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '12px 22px',
+              background: 'var(--accent)',
+              color: '#FFFFFF',
+              borderRadius: 999,
+              fontFamily: T.font.ui,
+              fontSize: 15,
+              fontWeight: 600,
+              letterSpacing: '-0.005em',
+              cursor: 'pointer',
+              transition: 'transform 200ms cubic-bezier(0.16, 1, 0.3, 1), filter 200ms ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+              e.currentTarget.style.filter = 'brightness(1.05)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'none';
+              e.currentTarget.style.filter = 'none';
+            }}
+          >
+            {nextPallet ? `${nextPallet.id} starten` : 'Weiter'}
+            <BetaKbd>Space</BetaKbd>
+          </button>
+        </div>
+      </div>
+
+      <SharedKeyframes />
+    </div>
+  );
+}
+
+function BetaPanel({ children }) {
+  return (
+    <div style={{
+      background: '#FFFFFF',
+      borderRadius: 24,
+      padding: '22px 26px',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaKbd({ children }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 30, height: 20,
+      padding: '0 7px',
+      fontSize: 10.5,
+      fontFamily: T.font.mono,
+      fontWeight: 700,
+      color: '#FFFFFF',
+      background: 'rgba(255, 255, 255, 0.22)',
+      borderRadius: 6,
+      lineHeight: 1,
+      letterSpacing: '0.04em',
+    }}>{children}</span>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   SHARED atoms — used by both variants.
+   ══════════════════════════════════════════════════════════════════════ */
+
 function Hairline() {
   return (
     <div style={{
@@ -144,7 +331,6 @@ function Hairline() {
   );
 }
 
-/* ── Section eyebrow ── */
 function Eyebrow({ children, color, icon }) {
   return (
     <div style={{
@@ -164,9 +350,6 @@ function Eyebrow({ children, color, icon }) {
   );
 }
 
-/* ── Next-pallet preview: ID + count on one line, one short line
-   per item below — each tinted to its level. No eyebrow inside;
-   the section already carries one above the hairline. ──────────── */
 function NextPalletPreview({ pallet }) {
   const items = pallet?.items || [];
   const total = items.length;
@@ -231,13 +414,6 @@ function NextPalletPreview({ pallet }) {
   );
 }
 
-/* ── Hint strip — surfaces what's worth a second look about the next
-   pallet (4-Seiten-Warnung, OVERLOAD-W/V, ESKU presence, item count).
-   Renders nothing when the hint list is empty so a clean pallet
-   produces a clean card. Each hint reads as a single line: tone-tinted
-   leading dot · label · optional muted detail. Wrapped in its own
-   non-bordered block so it sits inside the "Nächste Palette" zone
-   without visually competing with the level-line rhythm above. */
 function HintList({ hints }) {
   return (
     <ul style={{
@@ -301,8 +477,7 @@ function HintLine({ tone, label, detail }) {
   );
 }
 
-/* ── Atoms ── */
-function Kbd({ children, onPrimary }) {
+function ClassicKbd({ children, onPrimary }) {
   return (
     <span style={{
       display: 'inline-flex',
@@ -330,11 +505,21 @@ function CheckIcon() {
   );
 }
 
-/* Duration formatter — produces `Xh Ym` once the elapsed time crosses
-   one hour, `Mm Ss` underneath, and `Ss` for sub-minute. Previous fmt
-   collapsed everything into `m:ss`, which produced unreadable strings
-   like `3843:12` for the warehouse's long-tail (workers stepping away
-   mid-pallet). Anchors mono digits to a single visual rhythm. */
+function SharedKeyframes() {
+  return (
+    <style>{`
+      @keyframes interlude-bg-in {
+        from { opacity: 0; }
+        to   { opacity: 1; }
+      }
+      @keyframes interlude-card-in {
+        from { opacity: 0; transform: translateY(14px) scale(0.98); }
+        to   { opacity: 1; transform: translateY(0)    scale(1); }
+      }
+    `}</style>
+  );
+}
+
 function fmtDuration(ms) {
   if (!ms || ms < 0) return '0s';
   const sec = Math.floor(ms / 1000);

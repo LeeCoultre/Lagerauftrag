@@ -25,6 +25,7 @@ import type { UseQueryResult } from '@tanstack/react-query';
 import { useQueryClient } from '@tanstack/react-query';
 import { UserButton, useUser } from '@clerk/clerk-react';
 import { useAppState } from '@/state.jsx';
+import { useConfirm } from '@/components/ConfirmDialog';
 import { useMe } from '@/hooks/useMe.js';
 import { useMyShift } from '@/hooks/useMyShift.js';
 import { useApiHealth } from '@/hooks/useApiHealth.js';
@@ -69,6 +70,7 @@ const SECTIONS = [
 /* ════════════════════════════════════════════════════════════════════════ */
 export default function EinstellungenScreen({ onRoute }: { onRoute?: (route: string) => void }) {
   const { queue, history, clearQueue, clearHistory } = useAppState();
+  const confirm = useConfirm();
   const meQ = useMe();
   const me = meQ.data;
   const { user: clerkUser } = useUser();
@@ -277,7 +279,15 @@ export default function EinstellungenScreen({ onRoute }: { onRoute?: (route: str
                 <Button
                   variant="danger"
                   size="sm"
-                  onClick={() => { if (confirm('Warteschlange wirklich leeren?')) clearQueue(); }}
+                  onClick={async () => {
+                    const ok = await confirm({
+                      message: 'Warteschlange wirklich leeren?',
+                      detail: `${queue.length} Auftr${queue.length === 1 ? 'ag wird' : 'äge werden'} entfernt. Diese Aktion lässt sich nicht rückgängig machen.`,
+                      confirmLabel: 'Leeren',
+                      danger: true,
+                    });
+                    if (ok) clearQueue();
+                  }}
                 >
                   Leeren
                 </Button>
@@ -290,7 +300,15 @@ export default function EinstellungenScreen({ onRoute }: { onRoute?: (route: str
                 <Button
                   variant="danger"
                   size="sm"
-                  onClick={() => { if (confirm('Historie wirklich löschen?')) clearHistory(); }}
+                  onClick={async () => {
+                    const ok = await confirm({
+                      message: 'Historie wirklich löschen?',
+                      detail: `${history.length} abgeschlossene Auftr${history.length === 1 ? 'ag wird' : 'äge werden'} dauerhaft gelöscht.`,
+                      confirmLabel: 'Löschen',
+                      danger: true,
+                    });
+                    if (ok) clearHistory();
+                  }}
                 >
                   Löschen
                 </Button>

@@ -8,6 +8,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { useMe } from '@/hooks/useMe.js';
+import { useConfirm } from '@/components/ConfirmDialog';
 import {
   adminListAuftraege,
   adminListUsers,
@@ -168,6 +169,7 @@ function AuftraegeTab() {
 function UsersTab() {
   const meQ = useMe();
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const usersQ = useQuery({
     queryKey: ['admin', 'users'],
     queryFn: adminListUsers,
@@ -179,9 +181,15 @@ function UsersTab() {
     onError: (err: unknown) => alert((err instanceof Error ? err.message : null) || 'Fehler beim Ändern der Rolle'),
   });
 
-  const onToggle = (u: { id: string; name: string; role: string }) => {
+  const onToggle = async (u: { id: string; name: string; role: string }) => {
     const next = u.role === 'admin' ? 'user' : 'admin';
-    if (!confirm(`Rolle für ${u.name} ändern: ${u.role} → ${next}?`)) return;
+    const ok = await confirm({
+      message: `Rolle von ${u.name} ändern?`,
+      detail: `${u.role.toUpperCase()} → ${next.toUpperCase()}`,
+      confirmLabel: 'Rolle ändern',
+      tone: 'primary',
+    });
+    if (!ok) return;
     roleMut.mutate({ id: u.id, role: next });
   };
 

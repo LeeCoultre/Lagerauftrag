@@ -303,6 +303,59 @@ const PROD_PACK_INV = 1.10;       // produktion outer-carton slack
 const KLEBE_PACK_INV = 1.10;      // Klebeband outer-carton slack
 const TACHO_PACK_INV = 1.20;      // small spool packing
 
+/* Carton SHAPE (not volume) for the iso preview in Focus. Only the
+   ratio L:W:H matters — BoxIso normalises the largest axis to 1, so any
+   per-axis packing slack cancels out.
+
+   For thermal/tacho rolls we don't have the carton's outer dimensions
+   without a sku_dimensions row; we *do* know the single-roll bounding
+   box (`dim.w` axial × `dim.normH||h` diameter, mm) and `rollen` per
+   Einheit. Modeling rolls as standing on their circular face packed
+   into a grid (cols × rows × layers) recovers a realistic carton
+   silhouette: e.g. 50 rolls of 57×35 → 5×5×2 grid → 175×175×114 mm,
+   matching the actual 185×185×126 mm carton in ratio (the few mm of
+   cardboard slack are invisible in iso).
+
+   Returns null when the item has no usable dimensional hint — Focus
+   then hides the iso entirely rather than guess. */
+export function cartonShapeMm(it) {
+  // Explicit dimensions from sku_dimensions table win.
+  const d = it?.dimensions;
+  if (d?.lengthCm && d?.widthCm && d?.heightCm) {
+    return { l: d.lengthCm * 10, w: d.widthCm * 10, h: d.heightCm * 10 };
+  }
+  const lvl = getDisplayLevel(it);
+  const dm = it?.dim;
+  const wMm = dm?.w;                           // axial roll width
+  const dMm = dm?.normH ?? dm?.h;              // outer roll diameter
+  // Thermal & tacho rolls — derive carton shape from grid-packed rolls.
+  if (wMm && dMm && (THERMO_FAMILY.has(lvl) || lvl === 7)) {
+    const rolls = Math.max(1, it.rollen || 1);
+    if (rolls === 1) return { l: wMm, w: dMm, h: dMm };
+    const limit = Math.min(20, rolls);
+    let best = { L: rolls * dMm, W: dMm, H: wMm, score: Infinity };
+    for (let cc = 1; cc <= limit; cc++) {
+      for (let rr = cc; rr <= limit; rr++) {
+        const ll = Math.max(1, Math.ceil(rolls / (cc * rr)));
+        const waste = (cc * rr * ll - rolls) / rolls;
+        if (waste > 0.5) continue;
+        const L = cc * dMm;
+        const W = rr * dMm;
+        const H = ll * wMm;
+        const dims = [L, W, H].sort((a, b) => a - b);
+        const elong = dims[2] / dims[0];
+        const score = elong + waste * 2;
+        if (score < best.score) best = { L, W, H, score };
+      }
+    }
+    return { l: best.L, w: best.W, h: best.H };
+  }
+  // No grid model for non-roll items — fall back to single-Einheit
+  // bounding box from dim if present.
+  if (wMm && dMm) return { l: wMm, w: dMm, h: dMm };
+  return null;
+}
+
 function mixedItemHeuristicCm3(it) {
   const lvl = getDisplayLevel(it);
   if (THERMO_FAMILY.has(lvl)) {
@@ -1687,6 +1740,8 @@ export function focusItemView(item) {
     units:          item.units || 0,
     name:           shortArticleName(item),
     dim:            item.dimStr,
+    dimRaw:         item.dim,           // numeric {w,h,normW,normH} from parser
+    dimensions:     item.dimensions,    // sku_dimensions row {lengthCm,widthCm,heightCm,weightKg}
     rollen:         perCarton,
     rollenUnit:     perCartonUnit,
     level:          lvl,

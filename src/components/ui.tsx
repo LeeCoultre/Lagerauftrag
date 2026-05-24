@@ -5,6 +5,7 @@
 
 import React, { useEffect, useState, type ReactNode, type CSSProperties, type ButtonHTMLAttributes } from 'react';
 import { Wordmark } from './Logo.jsx';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 /* ─── Shared types ───────────────────────────────────────────────────── */
 export interface Crumb {
@@ -102,11 +103,15 @@ export const T = {
 };
 
 /* ─── Page shell ─────────────────────────────────────────────────────── */
-/* Page-level wrapper — sets canvas bg, font and reset */
+/* Page-level wrapper — sets canvas bg, font and reset.
+   In beta mode we go transparent so the AppShell gradient
+   (--bg-gradient) shows through; classic mode keeps its solid
+   --bg-page so nothing visually changes for non-beta users. */
 export function Page({ children, style }: { children?: ReactNode; style?: CSSProperties }) {
+  const { beta } = useBetaDesign();
   return (
     <div style={{
-      background: T.bg.page,
+      background: beta ? 'transparent' : T.bg.page,
       minHeight: '100vh',
       fontFamily: T.font.ui,
       color: T.text.primary,

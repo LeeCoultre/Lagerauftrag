@@ -18,7 +18,7 @@ import { T } from './ui.jsx';
 const PALLET_VOL_M3   = 1.59;
 const PALLET_WEIGHT_KG = 700;
 
-export default function PalletStackViz({ palletState, size = 'row', onClick, pulseLevel = null }) {
+export default function PalletStackViz({ palletState, size = 'row', onClick, pulseLevel = null, radius: radiusOverride = null }) {
   const isCard = size === 'card';
   const isCompact = size === 'compact';
   const isStory = size === 'story';
@@ -78,6 +78,7 @@ export default function PalletStackViz({ palletState, size = 'row', onClick, pul
         onClick={onClick}
         pulseLevel={pulseLevel}
         compactLabels={isStory}
+        radiusOverride={radiusOverride}
       />
     );
   }
@@ -125,12 +126,12 @@ export default function PalletStackViz({ palletState, size = 'row', onClick, pul
 function PalletFrame({
   palletState, levelHeights, volByLevel, totalUsedHeight,
   W, H, showLabels, flagged, onClick,
-  pulseLevel = null, compactLabels = false,
+  pulseLevel = null, compactLabels = false, radiusOverride = null,
 }) {
   const [hover, setHover] = useState(null);
   const patternId = useId().replace(/:/g, '');
 
-  const radius = showLabels ? 14 : 6;
+  const radius = radiusOverride != null ? radiusOverride : (showLabels ? 14 : 6);
   // Stack bottom-up
   let yCursor = H;
   const layers = [];

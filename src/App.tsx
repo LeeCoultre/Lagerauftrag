@@ -10,6 +10,7 @@ import { useExperiment } from './utils/experiments';
 import { CommandPalette } from './components/CommandPalette.jsx';
 import { T } from './components/ui';
 import { BetaDesignProvider } from './hooks/useBetaDesign';
+import { ConfirmDialogProvider } from './components/ConfirmDialog';
 
 /* Stale-deploy resilience for code-split chunks.
    When Railway redeploys, old chunk filenames are deleted. A tab
@@ -101,10 +102,12 @@ export default function App() {
   const [islandEnabled] = useExperiment('dynamicIsland');
   return (
     <BetaDesignProvider>
-      <AppStateProvider>
-        <Router />
-        {islandEnabled && <DynamicIsland />}
-      </AppStateProvider>
+      <ConfirmDialogProvider>
+        <AppStateProvider>
+          <Router />
+          {islandEnabled && <DynamicIsland />}
+        </AppStateProvider>
+      </ConfirmDialogProvider>
     </BetaDesignProvider>
   );
 }

@@ -38,11 +38,13 @@ import { usePasteFile } from '@/hooks/usePasteFile.js';
 import {
   Page, Topbar, StepperBar, Badge, CornerMarks, T,
 } from '@/components/ui.jsx';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 const COUNTDOWN_SEC = 3;
 
 /* ════════════════════════════════════════════════════════════════════════ */
 export default function UploadScreen({ onRoute }) {
+  const { beta } = useBetaDesign();
   const { queue, history, current, addFiles, startEntry } = useAppState();
   const { items: recent, add: addRecent, remove: removeRecent } = useRecentUploads();
   const apiHealth = useApiHealth();
@@ -268,6 +270,51 @@ export default function UploadScreen({ onRoute }) {
 
   const showEducation = !current && queue.length === 0 && recent.length === 0
     && !busy && !lastSuccess && !parseError && !countdown && !duplicateConfirm;
+
+  if (beta) {
+    return (
+      <BetaUploadView
+        queue={queue}
+        isOffline={isOffline}
+        over={over}
+        globalOver={globalOver}
+        busy={busy}
+        batch={liveBatch}
+        singleSuccess={singleSuccessRow}
+        showBatchSummary={showBatchSummary}
+        parseError={parseError}
+        countdown={countdown}
+        duplicateConfirm={duplicateConfirm}
+        lastSuccess={lastSuccess}
+        inputRef={inputRef}
+        acceptFiles={acceptFiles}
+        onPick={() => inputRef.current?.click()}
+        onDragOverChange={setOver}
+        onCancelCountdown={cancelCountdown}
+        onStartNow={() => {
+          const idToStart = countdown?.auftragId || lastSuccess?.id;
+          if (idToStart) {
+            cancelCountdown();
+            startEntry(idToStart);
+          }
+        }}
+        onAttachInstead={() => {
+          cancelCountdown();
+          if (onRoute) onRoute('warteschlange');
+        }}
+        onClearError={() => { setParseError(null); setBatchDone([]); }}
+        onConfirmDupes={confirmDuplicates}
+        onCancelDupes={cancelDuplicates}
+        onStartFromBatch={(id) => { startEntry(id); }}
+        onAllToQueue={() => {
+          setBatchDone([]);
+          if (onRoute) onRoute('warteschlange');
+        }}
+        onCloseBatchSummary={() => setBatchDone([])}
+        onOpenQueue={() => onRoute && onRoute('warteschlange')}
+      />
+    );
+  }
 
   return (
     <Page>
@@ -1944,4 +1991,1057 @@ function formatMin(sec) {
   if (min < 60) return `${min}m`;
   const h = Math.floor(min / 60);
   return `${h}h ${min % 60}m`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   BETA UPLOAD VIEW — minimalist centered drop-zone card with state-machine
+   inner body, plus optional floating queue pill. Matches the FlowHero /
+   BetaIslandBar / BetaInterlude / BetaFinale / BetaAbschluss vocabulary:
+   paper #F4F5F7 outer card + 2px white rim + halo + nested white panel
+   + accent action pill.
+   ════════════════════════════════════════════════════════════════════════ */
+function BetaUploadView({
+  queue, isOffline, over, globalOver, busy, batch,
+  singleSuccess, showBatchSummary, parseError, countdown, duplicateConfirm,
+  lastSuccess, inputRef, acceptFiles,
+  onPick, onDragOverChange,
+  onCancelCountdown, onStartNow, onAttachInstead, onClearError,
+  onConfirmDupes, onCancelDupes,
+  onStartFromBatch, onAllToQueue, onCloseBatchSummary,
+  onOpenQueue,
+}) {
+  /* State-machine resolver — single in-place body per render. Ordering
+     mirrors HeroDropZone's classic precedence. */
+  const state: 'countdown' | 'duplicate' | 'error' | 'parsing' | 'success-single' | 'success-multi' | 'drag-over' | 'idle' = (() => {
+    if (countdown)         return 'countdown';
+    if (duplicateConfirm)  return 'duplicate';
+    if (parseError)        return 'error';
+    if (busy)              return 'parsing';
+    if (singleSuccess)     return 'success-single';
+    if (showBatchSummary)  return 'success-multi';
+    if (over || globalOver) return 'drag-over';
+    return 'idle';
+  })();
+
+  /* Inner panel inset-ring colour per state — replaces the classic
+     border palette while keeping the white panel surface clean. */
+  const ringColor = (() => {
+    if (state === 'error' || isOffline) return T.status.danger.main;
+    if (state === 'duplicate')          return T.status.warn.main;
+    if (state === 'drag-over')          return 'var(--accent)';
+    return null;
+  })();
+
+  const isClickable = state === 'idle' || state === 'drag-over';
+
+  return (
+    <Page>
+      <main style={{
+        maxWidth: 720,
+        margin: '0 auto',
+        padding: '32px 32px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        minHeight: '100vh',
+        justifyContent: 'center',
+        alignItems: 'stretch',
+        fontFamily: T.font.ui,
+      }}>
+        <div
+          onClick={() => { if (isClickable) onPick(); }}
+          onDragOver={(e) => { e.preventDefault(); onDragOverChange(true); }}
+          onDragLeave={() => onDragOverChange(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            onDragOverChange(false);
+            acceptFiles(e.dataTransfer.files);
+          }}
+          style={{
+            padding: 8,
+            background: '#F4F5F7',
+            border: '2px solid #FFFFFF',
+            borderRadius: 32,
+            boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            cursor: isClickable ? 'pointer' : 'default',
+            transition: 'transform 240ms cubic-bezier(0.16, 1, 0.3, 1)',
+            transform: state === 'drag-over' ? 'scale(1.005)' : 'scale(1)',
+          }}
+        >
+          <div style={{
+            background: state === 'drag-over' ? T.accent.bg : '#FFFFFF',
+            borderRadius: 24,
+            padding: '44px 44px',
+            boxShadow: ringColor ? `inset 0 0 0 2px ${ringColor}` : 'none',
+            transition: 'background 240ms ease, box-shadow 240ms ease',
+            minHeight: 260,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+          }}>
+            <BetaUploadBody
+              state={state}
+              isOffline={isOffline}
+              batch={batch}
+              singleSuccess={singleSuccess}
+              parseError={parseError}
+              countdown={countdown}
+              duplicateConfirm={duplicateConfirm}
+              lastSuccess={lastSuccess}
+              onPick={onPick}
+              onCancelCountdown={onCancelCountdown}
+              onStartNow={onStartNow}
+              onAttachInstead={onAttachInstead}
+              onClearError={onClearError}
+              onConfirmDupes={onConfirmDupes}
+              onCancelDupes={onCancelDupes}
+              onStartFromBatch={onStartFromBatch}
+              onAllToQueue={onAllToQueue}
+              onCloseBatchSummary={onCloseBatchSummary}
+            />
+          </div>
+        </div>
+      </main>
+
+      {queue.length > 0 && (
+        <BetaQueuePill count={queue.length} onOpen={onOpenQueue} />
+      )}
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".docx"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => { acceptFiles(e.target.files); e.target.value = ''; }}
+      />
+    </Page>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Body switcher — picks the right inner content per state.
+   ────────────────────────────────────────────────────────────────────── */
+function BetaUploadBody({
+  state, isOffline, batch, singleSuccess, parseError, countdown,
+  duplicateConfirm, lastSuccess,
+  onPick, onCancelCountdown, onStartNow, onAttachInstead, onClearError,
+  onConfirmDupes, onCancelDupes,
+  onStartFromBatch, onAllToQueue, onCloseBatchSummary,
+}) {
+  if (state === 'countdown') {
+    return (
+      <BetaCountdownBody
+        countdown={countdown}
+        lastSuccess={lastSuccess}
+        onCancel={onCancelCountdown}
+        onStartNow={onStartNow}
+      />
+    );
+  }
+  if (state === 'duplicate') {
+    return (
+      <BetaDuplicateBody
+        dupes={duplicateConfirm?.dupes || []}
+        onConfirm={onConfirmDupes}
+        onCancel={onCancelDupes}
+      />
+    );
+  }
+  if (state === 'error') {
+    return (
+      <BetaErrorBody
+        message={parseError}
+        onRetry={() => { onClearError(); onPick(); }}
+      />
+    );
+  }
+  if (state === 'parsing') {
+    return <BetaParsingBody batch={batch} />;
+  }
+  if (state === 'success-single') {
+    return (
+      <BetaSuccessSingleBody
+        row={singleSuccess}
+        onStart={onStartNow}
+        onAttach={onAttachInstead}
+      />
+    );
+  }
+  if (state === 'success-multi') {
+    return (
+      <BetaSuccessMultiBody
+        batch={batch}
+        onStartFromBatch={onStartFromBatch}
+        onAllToQueue={onAllToQueue}
+        onClose={onCloseBatchSummary}
+      />
+    );
+  }
+  if (state === 'drag-over') {
+    return <BetaIdleBody dragging onPick={onPick} isOffline={isOffline} />;
+  }
+  return <BetaIdleBody onPick={onPick} isOffline={isOffline} />;
+}
+
+/* ── IDLE / DRAG-OVER body ──────────────────────────────────────────── */
+function BetaIdleBody({ onPick, isOffline, dragging = false }: { onPick: () => void; isOffline: boolean; dragging?: boolean }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 16,
+      textAlign: 'center',
+    }}>
+      <div style={{
+        transform: dragging ? 'scale(1.1)' : 'scale(1)',
+        transition: 'transform 240ms cubic-bezier(0.16, 1, 0.3, 1)',
+      }}>
+        <BetaDropIcon size={56} color={dragging ? 'var(--accent)' : T.text.faint} />
+      </div>
+      <BetaEyebrow>{isOffline ? 'Offline' : 'Auftrag laden'}</BetaEyebrow>
+      <h1 style={{
+        margin: 0,
+        fontSize: 'clamp(24px, 2.8vw, 32px)',
+        fontWeight: 600,
+        letterSpacing: '-0.018em',
+        lineHeight: 1.1,
+        color: T.text.primary,
+      }}>
+        {dragging ? 'Loslassen, um zu laden' : 'Lagerauftrag ablegen'}
+      </h1>
+      <p style={{
+        margin: 0,
+        fontSize: 13,
+        color: T.text.subtle,
+        maxWidth: 420,
+      }}>
+        {isOffline
+          ? 'Server offline — Backend nicht erreichbar.'
+          : '.docx-Datei hierher ziehen oder klicken'}
+      </p>
+      {!isOffline && (
+        <>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onPick(); }}
+            style={betaAccentPillStyle}
+            onMouseEnter={betaAccentPillHover}
+            onMouseLeave={betaAccentPillLeave}
+          >
+            Datei wählen
+            <BetaKbd>O</BetaKbd>
+          </button>
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 10.5,
+            fontWeight: 600,
+            color: T.text.faint,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+          }}>
+            oder Strg + V einfügen
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── PARSING body ───────────────────────────────────────────────────── */
+function BetaParsingBody({ batch }) {
+  const total = batch.length;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <BetaEyebrow icon={<BetaSpinnerIcon />}>
+        Parst {total} {total === 1 ? 'Datei' : 'Dateien'}
+      </BetaEyebrow>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {batch.map((row, i) => <BetaBatchRow key={i} row={row} />)}
+      </div>
+    </div>
+  );
+}
+
+/* ── SUCCESS-SINGLE body ────────────────────────────────────────────── */
+function BetaSuccessSingleBody({ row, onStart, onAttach }) {
+  const entry = row?.entry;
+  const meta: Record<string, unknown> = entry?.parsed?.meta || {};
+  const fba = (meta.sendungsnummer as string | undefined)
+    || (meta.fbaCode as string | undefined)
+    || row?.fba
+    || entry?.fileName
+    || '—';
+  const destination = (meta.destination as string | undefined) || '';
+  const format = (meta.format as string | undefined) || (entry?.parsed?.format as string | undefined) || '';
+  const palletCount = row?.palletCount ?? 0;
+  const articleCount = row?.articleCount ?? 0;
+  const validation = (row?.validation as { warnings?: unknown[]; errors?: unknown[] } | null) || null;
+  const warnings = (validation?.warnings as unknown[] | undefined) || [];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <BetaEyebrow color={T.status.success.text} icon={<BetaCheckIcon />}>
+        Geladen
+      </BetaEyebrow>
+
+      <BetaBigCopy value={fba} rawValue={String(fba)} ariaLabel="FBA-Code" />
+
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 10,
+        fontFamily: T.font.mono,
+        fontSize: 11.5,
+        fontWeight: 600,
+        color: T.text.subtle,
+        letterSpacing: '0.10em',
+        textTransform: 'uppercase',
+      }}>
+        {destination && (
+          <>
+            <span style={{ color: T.text.faint }}>Ziel</span>
+            <span style={{ color: T.text.primary }}>{destination}</span>
+            <BetaMetaDot />
+          </>
+        )}
+        {format && (
+          <>
+            <span>{format}</span>
+            <BetaMetaDot />
+          </>
+        )}
+        <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {palletCount} Pal · {articleCount} Art
+        </span>
+      </div>
+
+      {warnings.length > 0 && (
+        <details style={{
+          background: T.bg.surface2,
+          borderRadius: 12,
+          padding: '10px 14px',
+        }}>
+          <summary style={{
+            cursor: 'pointer',
+            fontSize: 12,
+            fontWeight: 600,
+            color: T.status.warn.text,
+            fontFamily: T.font.mono,
+            letterSpacing: '0.05em',
+          }}>
+            {warnings.length} Warnung{warnings.length === 1 ? '' : 'en'}
+          </summary>
+          <ul style={{
+            margin: '10px 0 0',
+            paddingLeft: 18,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            fontSize: 12.5,
+            color: T.text.subtle,
+          }}>
+            {(warnings as Array<{ message?: string }>).slice(0, 8).map((w, i) => (
+              <li key={i}>{w?.message || String(w)}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        marginTop: 4,
+      }}>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onStart(); }}
+          style={betaAccentPillStyle}
+          onMouseEnter={betaAccentPillHover}
+          onMouseLeave={betaAccentPillLeave}
+        >
+          Jetzt starten
+          <BetaKbd>Space</BetaKbd>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onAttach(); }}
+          style={betaGhostLinkStyle}
+        >
+          In Warteschlange
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── SUCCESS-MULTI body ─────────────────────────────────────────────── */
+function BetaSuccessMultiBody({ batch, onStartFromBatch, onAllToQueue, onClose }) {
+  const successes = batch.filter((b) => b.stage === 'done');
+  const errors    = batch.filter((b) => b.stage === 'error');
+  const firstReadyId = successes[0]?.entry?.id;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+      }}>
+        <BetaEyebrow color={T.status.success.text} icon={<BetaCheckIcon />}>
+          {successes.length} Geladen{errors.length > 0 ? ` · ${errors.length} Fehler` : ''}
+        </BetaEyebrow>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onClose(); }}
+          aria-label="Schließen"
+          style={betaSmallCloseStyle}
+        >
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none"
+               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M3 3l6 6M9 3l-6 6" />
+          </svg>
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {batch.map((row, i) => <BetaBatchRow key={i} row={row} />)}
+      </div>
+
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        marginTop: 4,
+      }}>
+        {firstReadyId && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onStartFromBatch(firstReadyId); }}
+            style={betaAccentPillStyle}
+            onMouseEnter={betaAccentPillHover}
+            onMouseLeave={betaAccentPillLeave}
+          >
+            Ersten starten
+            <BetaKbd>Space</BetaKbd>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onAllToQueue(); }}
+          style={betaGhostLinkStyle}
+        >
+          Alle in Warteschlange
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── ERROR body ─────────────────────────────────────────────────────── */
+function BetaErrorBody({ message, onRetry }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 14,
+      textAlign: 'center',
+    }}>
+      <span aria-hidden style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 56, height: 56,
+        borderRadius: '50%',
+        background: T.status.danger.bg,
+        color: T.status.danger.main,
+      }}>
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+          <path d="M12 7v6M12 17h.01" />
+          <circle cx="12" cy="12" r="9.5" />
+        </svg>
+      </span>
+      <BetaEyebrow color={T.status.danger.text}>Fehler</BetaEyebrow>
+      <p style={{
+        margin: 0,
+        fontSize: 14,
+        color: T.text.primary,
+        maxWidth: 440,
+      }}>
+        {message || 'Etwas ist schiefgelaufen.'}
+      </p>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onRetry(); }}
+        style={betaAccentPillStyle}
+        onMouseEnter={betaAccentPillHover}
+        onMouseLeave={betaAccentPillLeave}
+      >
+        Andere Datei wählen
+      </button>
+    </div>
+  );
+}
+
+/* ── DUPLICATE body ─────────────────────────────────────────────────── */
+function BetaDuplicateBody({ dupes, onConfirm, onCancel }) {
+  const labels = (dupes || []).map((d: { hit?: { entry?: { fbaCode?: string; fileName?: string } }; file?: File }) => {
+    return d.hit?.entry?.fbaCode || d.hit?.entry?.fileName || d.file?.name || '—';
+  });
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <BetaEyebrow color={T.status.warn.text}>Schon vorhanden</BetaEyebrow>
+      <p style={{
+        margin: 0,
+        fontSize: 13,
+        color: T.text.subtle,
+        maxWidth: 480,
+      }}>
+        {dupes.length === 1
+          ? '1 Datei ist bereits in der Warteschlange oder Historie:'
+          : `${dupes.length} Dateien sind bereits in der Warteschlange oder Historie:`}
+      </p>
+      <ul style={{
+        margin: 0,
+        padding: 0,
+        listStyle: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+      }}>
+        {labels.slice(0, 4).map((label, i) => (
+          <li key={i} style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '8px 12px',
+            background: T.bg.surface2,
+            borderRadius: 12,
+            fontFamily: T.font.mono,
+            fontSize: 12.5,
+            color: T.text.primary,
+            letterSpacing: '0.02em',
+          }}>
+            <span aria-hidden style={{
+              width: 6, height: 6,
+              borderRadius: '50%',
+              background: T.status.warn.main,
+            }} />
+            {label}
+          </li>
+        ))}
+        {labels.length > 4 && (
+          <li style={{
+            padding: '6px 12px',
+            fontSize: 12,
+            color: T.text.faint,
+            fontFamily: T.font.mono,
+            letterSpacing: '0.02em',
+          }}>
+            + {labels.length - 4} weitere
+          </li>
+        )}
+      </ul>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        marginTop: 4,
+      }}>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onConfirm(); }}
+          style={betaAccentPillStyle}
+          onMouseEnter={betaAccentPillHover}
+          onMouseLeave={betaAccentPillLeave}
+        >
+          Trotzdem laden
+        </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onCancel(); }}
+          style={betaGhostLinkStyle}
+        >
+          Abbrechen
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── COUNTDOWN body ─────────────────────────────────────────────────── */
+function BetaCountdownBody({ countdown, lastSuccess, onCancel, onStartNow }) {
+  const entry = lastSuccess;
+  const meta: Record<string, unknown> = entry?.parsed?.meta || {};
+  const fba = (meta.sendungsnummer as string | undefined)
+    || (meta.fbaCode as string | undefined)
+    || entry?.fileName
+    || '—';
+  const pct = ((COUNTDOWN_SEC - countdown.remaining) / COUNTDOWN_SEC) * 100;
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 16,
+      textAlign: 'center',
+    }}>
+      <BetaEyebrow color={T.status.success.text} icon={<BetaCheckIcon />}>
+        Geladen
+      </BetaEyebrow>
+      <BetaBigCopy value={fba} rawValue={String(fba)} ariaLabel="FBA-Code" />
+      <p style={{
+        margin: 0,
+        fontSize: 13,
+        color: T.text.subtle,
+      }}>
+        Auto-Start in {countdown.remaining}s · Esc zum Abbrechen
+      </p>
+      <div style={{
+        width: '100%',
+        maxWidth: 360,
+        height: 4,
+        background: T.border.subtle,
+        borderRadius: 999,
+        overflow: 'hidden',
+      }}>
+        <div style={{
+          width: `${pct}%`,
+          height: '100%',
+          background: 'var(--accent)',
+          transition: 'width 1000ms linear',
+        }} />
+      </div>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        marginTop: 4,
+      }}>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onStartNow(); }}
+          style={betaAccentPillStyle}
+          onMouseEnter={betaAccentPillHover}
+          onMouseLeave={betaAccentPillLeave}
+        >
+          Sofort starten
+          <BetaKbd>Space</BetaKbd>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onCancel(); }}
+          style={betaGhostLinkStyle}
+        >
+          Stop
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Floating queue pill (bottom-center) ────────────────────────────── */
+function BetaQueuePill({ count, onOpen }) {
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 18,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      marginLeft: 'calc(var(--sidebar-width) / 2)',
+      zIndex: 50,
+      background: '#F8F8F8',
+      border: '2px solid #FFFFFF',
+      borderRadius: 50,
+      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+      padding: '6px 6px 6px 22px',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 18,
+      whiteSpace: 'nowrap',
+    }}>
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        fontFamily: T.font.mono,
+        fontSize: 11.5,
+        fontWeight: 600,
+        color: T.text.subtle,
+        letterSpacing: '0.04em',
+      }}>
+        <span aria-hidden style={{
+          width: 6, height: 6,
+          borderRadius: '50%',
+          background: T.accent.main,
+          boxShadow: `0 0 0 3px ${T.accent.main}22`,
+        }} />
+        <span>
+          <span style={{
+            color: T.text.primary,
+            fontWeight: 700,
+            fontVariantNumeric: 'tabular-nums',
+          }}>
+            {count}
+          </span>{' '}
+          in Warteschlange
+        </span>
+      </span>
+      <button
+        type="button"
+        onClick={onOpen}
+        style={betaAccentPillStyle}
+        onMouseEnter={betaAccentPillHover}
+        onMouseLeave={betaAccentPillLeave}
+      >
+        Öffnen
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <path d="M3 7h8m0 0L7.5 3.5M11 7l-3.5 3.5" stroke="currentColor"
+                strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Beta atoms — local to Upload.tsx, mirror the pattern established in
+   Abschluss.tsx so the family vocabulary stays consistent.
+   ────────────────────────────────────────────────────────────────────── */
+
+function BetaEyebrow({ children, color, icon }: { children?: React.ReactNode; color?: string; icon?: React.ReactNode }) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 10.5,
+      fontWeight: 700,
+      fontFamily: T.font.mono,
+      color: color || T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.18em',
+    }}>
+      {icon}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function BetaCheckIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+      <path d="M2.5 6.5l2 2 5-5.5" stroke="currentColor" strokeWidth="2.2"
+            strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BetaSpinnerIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+         style={{ animation: 'mr-spin 600ms linear infinite' }}>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.4" opacity="0.25" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.4"
+            strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function BetaMetaDot() {
+  return (
+    <span aria-hidden style={{
+      width: 3, height: 3, borderRadius: '50%',
+      background: 'rgba(15, 23, 42, 0.22)',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function BetaDropIcon({ size = 56, color = T.text.faint }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none"
+         stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="14" y="10" width="36" height="44" rx="4" />
+      <path d="M22 22h20M22 30h20M22 38h12" />
+      <path d="M32 50v8M28 54l4 4 4-4" stroke={color} />
+    </svg>
+  );
+}
+
+function BetaKbd({ children }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 28, height: 20,
+      padding: '0 7px',
+      fontSize: 10.5,
+      fontFamily: T.font.mono,
+      fontWeight: 700,
+      color: '#FFFFFF',
+      background: 'rgba(255, 255, 255, 0.22)',
+      borderRadius: 6,
+      lineHeight: 1,
+      letterSpacing: '0.04em',
+    }}>{children}</span>
+  );
+}
+
+/* Big mono FBA-code click-to-copy — mirrors the BetaBigCopy in
+   Abschluss.tsx; duplicated locally to keep Upload.tsx self-contained. */
+function BetaBigCopy({ value, rawValue, ariaLabel }: { value: React.ReactNode; rawValue: string; ariaLabel?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = (e) => {
+    e.stopPropagation();
+    copyToClipboard(rawValue);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => { onClick(e); e.currentTarget.blur(); }}
+      title={copied ? 'Kopiert' : 'Klick zum Kopieren'}
+      aria-label={ariaLabel}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: '8px 12px',
+        marginLeft: -12,
+        background: copied ? T.status.success.bg : 'transparent',
+        borderRadius: 14,
+        transition: 'background 220ms ease',
+      }}
+    >
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 'clamp(28px, 3.6vw, 40px)',
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.primary,
+        letterSpacing: '-0.025em',
+        lineHeight: 1.05,
+        wordBreak: 'break-all',
+        transition: 'color 220ms ease',
+      }}>
+        {value}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 10,
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.faint,
+        letterSpacing: '0.10em',
+        textTransform: 'uppercase',
+      }}>
+        {copied ? '✓ Kopiert' : 'Klick zum Kopieren'}
+      </span>
+    </button>
+  );
+}
+
+/* Per-file inline row used in PARSING + SUCCESS-MULTI states. */
+function BetaBatchRow({ row }) {
+  const stage = row?.stage || 'pending';
+  const isDone   = stage === 'done';
+  const isError  = stage === 'error';
+  const isActive = stage === 'parsing';
+  const iconColor = isError ? T.status.danger.main
+                   : isDone  ? T.status.success.main
+                             : T.accent.main;
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '24px 1fr auto auto',
+      alignItems: 'center',
+      gap: 12,
+      padding: '10px 14px',
+      background: T.bg.surface2,
+      borderRadius: 14,
+    }}>
+      <span aria-hidden style={{
+        width: 24, height: 24,
+        borderRadius: '50%',
+        background: isDone ? T.status.success.bg : (isError ? T.status.danger.bg : T.accent.bg),
+        color: iconColor,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        {isActive ? (
+          <BetaSpinnerIcon />
+        ) : isDone ? (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+            <path d="M2.5 6.5l2 2 5-5.5" stroke="currentColor" strokeWidth="2.2"
+                  strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : isError ? (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none"
+               stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M3 3l6 6M9 3l-6 6" />
+          </svg>
+        ) : (
+          <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'currentColor' }} />
+        )}
+      </span>
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        minWidth: 0,
+        gap: 2,
+      }}>
+        <span style={{
+          fontSize: 13,
+          fontWeight: 500,
+          color: T.text.primary,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          letterSpacing: '-0.005em',
+        }}>
+          {row.fba || row.name}
+        </span>
+        {isError && row.error && (
+          <span style={{
+            fontSize: 11.5,
+            color: T.status.danger.text,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {row.error}
+          </span>
+        )}
+        {!isError && row.fba && (
+          <span style={{
+            fontSize: 11.5,
+            color: T.text.faint,
+            fontFamily: T.font.mono,
+            letterSpacing: '0.02em',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {row.name}
+          </span>
+        )}
+      </div>
+      {!isError && row.palletCount > 0 && (
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 11.5,
+          fontWeight: 600,
+          color: T.text.subtle,
+          fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap',
+        }}>
+          {row.palletCount} Pal
+        </span>
+      )}
+      {!isError && row.articleCount > 0 && (
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 11.5,
+          fontWeight: 600,
+          color: T.text.subtle,
+          fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap',
+        }}>
+          {row.articleCount} Art
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* ── shared style objects (avoid re-declaring per component) ────────── */
+const betaAccentPillStyle: React.CSSProperties = {
+  all: 'unset',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 10,
+  padding: '11px 22px',
+  background: 'var(--accent)',
+  color: '#FFFFFF',
+  borderRadius: 999,
+  fontFamily: T.font.ui,
+  fontSize: 14,
+  fontWeight: 600,
+  letterSpacing: '-0.005em',
+  cursor: 'pointer',
+  transition: 'transform 200ms cubic-bezier(0.16, 1, 0.3, 1), filter 200ms ease',
+};
+
+function betaAccentPillHover(e: React.MouseEvent<HTMLButtonElement>) {
+  e.currentTarget.style.transform = 'translateY(-1px)';
+  e.currentTarget.style.filter = 'brightness(1.05)';
+}
+
+function betaAccentPillLeave(e: React.MouseEvent<HTMLButtonElement>) {
+  e.currentTarget.style.transform = 'none';
+  e.currentTarget.style.filter = 'none';
+}
+
+const betaGhostLinkStyle: React.CSSProperties = {
+  all: 'unset',
+  cursor: 'pointer',
+  fontFamily: T.font.ui,
+  fontSize: 13,
+  fontWeight: 500,
+  color: T.text.subtle,
+  letterSpacing: '-0.005em',
+  padding: '4px 8px',
+};
+
+const betaSmallCloseStyle: React.CSSProperties = {
+  all: 'unset',
+  cursor: 'pointer',
+  width: 22, height: 22,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  borderRadius: 999,
+  color: T.text.faint,
+  transition: 'background 200ms ease, color 200ms ease',
+};
+
+/* ── clipboard helper — copy-paste from Abschluss for self-containment */
+function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackBetaCopy(text));
+    return;
+  }
+  fallbackBetaCopy(text);
+}
+function fallbackBetaCopy(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '0';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch {
+    /* ignore */
+  }
 }

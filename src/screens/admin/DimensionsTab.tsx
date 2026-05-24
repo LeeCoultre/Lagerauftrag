@@ -28,6 +28,7 @@ import {
   adminDeleteSkuDimension,
 } from '@/marathonApi.js';
 import { Card, T } from '@/components/ui.jsx';
+import { useConfirm } from '@/components/ConfirmDialog';
 import type {
   SkuDimensionRead,
   SkuDimensionUpsert,
@@ -59,6 +60,7 @@ const PAGE_SIZE = 50;
 
 export default function DimensionsTab() {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const [sortBy, setSortBy] = useState('updated');
@@ -181,13 +183,25 @@ export default function DimensionsTab() {
     importMut.mutate(file);
     e.target.value = '';
   };
-  const onDelete = (row) => {
-    if (!confirm(`Eintrag "${primaryKey(row)}" wirklich löschen?`)) return;
+  const onDelete = async (row) => {
+    const ok = await confirm({
+      message: 'Eintrag wirklich löschen?',
+      detail: `${primaryKey(row)} wird dauerhaft aus den SKU-Dimensionen entfernt.`,
+      confirmLabel: 'Löschen',
+      danger: true,
+    });
+    if (!ok) return;
     deleteMut.mutate(row.id);
   };
-  const onBulkDelete = () => {
+  const onBulkDelete = async () => {
     if (selected.size === 0) return;
-    if (!confirm(`${selected.size} Einträge wirklich löschen?`)) return;
+    const ok = await confirm({
+      message: `${selected.size} Einträge wirklich löschen?`,
+      detail: 'Diese SKU-Dimensionen werden dauerhaft entfernt. Aktion lässt sich nicht rückgängig machen.',
+      confirmLabel: 'Alle löschen',
+      danger: true,
+    });
+    if (!ok) return;
     [...selected].forEach((id) => deleteMut.mutate(id as number));
     setSelected(new Set());
   };

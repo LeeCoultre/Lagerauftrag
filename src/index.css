@@ -24,6 +24,7 @@
      dark-theme override in [data-theme="dark"] below repaints the whole
      UI without a single React re-render. */
   --bg-page:        #F4F5F9;
+  --bg-gradient:    linear-gradient(180deg, #F0F0F3 0%, #F6F0EE 100%);
   --bg-surface:     #FFFFFF;
   --bg-surface-2:   #F9FAFB;
   --bg-surface-3:   #F3F4F6;
@@ -104,6 +105,7 @@
   --ink-5:     #3D4350;
 
   --bg-page:        #000000;
+  --bg-gradient:    #000000;
   --bg-surface:     #0E0F12;
   --bg-surface-2:   #06070A;
   --bg-surface-3:   #14161B;

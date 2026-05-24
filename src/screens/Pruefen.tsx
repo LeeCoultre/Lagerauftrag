@@ -24,11 +24,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppState } from '@/state.jsx';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 import {
   pruefenView, distributeEinzelneSku, applyEskuOverrides, eskuOverrideKey,
   enrichItemDims,
   levelDistribution, sortItemsForPallet, LEVEL_META,
   itemTotalWeightKg,
+  formatItemTitle, getDisplayLevel,
 } from '@/utils/auftragHelpers.js';
 import { lookupSkuDimensions } from '@/marathonApi.js';
 import {
@@ -37,13 +39,24 @@ import {
 import PreflightCard from '@/components/PreflightCard.jsx';
 import PalletStoryCard from '@/components/PalletStoryCard.jsx';
 import PalletMiniCard from '@/components/PalletMiniCard.jsx';
+import PalletStackViz from '@/components/PalletStackViz.jsx';
 import { analyzeAuftrag } from '@/utils/preflightAnalyzer.js';
 import { buildPalletStory, rankPallets } from '@/utils/palletStory.js';
 
 const AUTO_OVERVIEW_THRESHOLD = 15;
 
-/* ════════════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════════════
+   Top-level router — branches on beta-design flag. Classic body preserved
+   verbatim; beta body rendered by BetaPruefen further down.
+   ════════════════════════════════════════════════════════════════════════ */
 export default function PruefenScreen() {
+  const { beta } = useBetaDesign();
+  if (beta) return <BetaPruefen />;
+  return <ClassicPruefen />;
+}
+
+/* ════════════════════════════════════════════════════════════════════════ */
+function ClassicPruefen() {
   const { current, goToStep, cancelCurrent, moveEskuToPallet } = useAppState();
   const rawPallets = current?.parsed?.pallets || [];
   const eskuItems  = current?.parsed?.einzelneSkuItems || [];
@@ -2028,4 +2041,1576 @@ function formatDur(sec) {
   if (h === 0) return `${m} min`;
   if (m === 0) return `${h} h`;
   return `${h} h ${m} min`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   ▓▓▓  BETA  ▓▓▓
+   Beta-mode variant — one column of three paper cards (Identity → Hinweise
+   if any → Paletten) + one floating Focus pill at the bottom. Mirrors the
+   paper-grey + 2px white rim + halo + nested white panels grammar applied
+   in FlowHero / BetaIslandBar / BetaInterlude / BetaFinale / BetaAbschluss
+   / BetaPalletList / BetaUpload.
+
+   Data flow is identical to ClassicPruefen — same hooks, same enrichment,
+   same distribution and override pipeline, same parser-warning ack model.
+   Only the surface UI changes; all keyboard, search, filter, ESKU-move,
+   and Focus-gate logic is preserved.
+   ════════════════════════════════════════════════════════════════════════ */
+function BetaPruefen() {
+  const { current, goToStep, moveEskuToPallet } = useAppState();
+  const rawPallets = current?.parsed?.pallets || [];
+  const eskuItems  = current?.parsed?.einzelneSkuItems || [];
+  const eskuOverrides = current?.eskuOverrides || {};
+
+  /* ── enrichment + distribution (same as classic) ─────────────────── */
+  const allItems = useMemo(() => [
+    ...rawPallets.flatMap((p) => p.items || []),
+    ...eskuItems,
+  ], [rawPallets, eskuItems]);
+
+  const dimsQ = useQuery({
+    queryKey: ['sku-dims', current?.id],
+    queryFn: () => enrichItemDims(allItems, lookupSkuDimensions),
+    enabled: !!current?.id && allItems.length > 0,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const enrichedPallets = useMemo(() => {
+    const enriched = dimsQ.data || null;
+    let cursor = 0;
+    const base = rawPallets.map((p) => ({
+      ...p,
+      items: (p.items || []).map((origIt) => {
+        const fromDims = enriched ? enriched[cursor] : null;
+        cursor += 1;
+        return fromDims || origIt;
+      }),
+    }));
+    return base.map((p) => ({ ...p, items: sortItemsForPallet(p.items || []) }));
+  }, [rawPallets, dimsQ.data]);
+
+  const enrichedEsku = useMemo(() => {
+    if (!dimsQ.data) return eskuItems;
+    const palletItemsCount = rawPallets.reduce((n, p) => n + (p.items?.length || 0), 0);
+    return eskuItems.map((it, i) => dimsQ.data[palletItemsCount + i] || it);
+  }, [eskuItems, rawPallets, dimsQ.data]);
+
+  const view = useMemo(
+    () => pruefenView({ ...current?.parsed, pallets: enrichedPallets }),
+    [current?.parsed, enrichedPallets],
+  );
+  const distribution = useMemo(() => {
+    const auto = distributeEinzelneSku(enrichedPallets, enrichedEsku);
+    return applyEskuOverrides(auto, eskuOverrides, enrichedPallets);
+  }, [enrichedPallets, enrichedEsku, eskuOverrides]);
+  const eskuDist = distribution.byPalletId;
+  const palletStates = distribution.palletStates;
+
+  const validation = current?.validation || { ok: true, errorCount: 0, warningCount: 0, issues: [] };
+  const validView = {
+    ok: validation.ok ?? (validation.errorCount === 0),
+    errors: validation.errorCount || 0,
+    warnings: validation.warningCount || 0,
+  };
+
+  /* ── Parser warnings aggregation (same as classic) ──────────────── */
+  const parseWarnings = useMemo(() => {
+    const out: Array<{
+      key: string; palletId: string; itemIdx: number; item: any;
+      warnings: any[]; maxSeverity: 'low' | 'medium' | 'high';
+    }> = [];
+    const addItems = (items: any[], palletId: string) => {
+      items.forEach((it, idx) => {
+        const ws = (it?.parseWarnings || []) as any[];
+        if (!ws.length) return;
+        const sev = ws.reduce((m: 'low' | 'medium' | 'high', w: any) =>
+          w.severity === 'high' ? 'high'
+          : (w.severity === 'medium' && m !== 'high') ? 'medium'
+          : m,
+        'low' as 'low' | 'medium' | 'high');
+        out.push({
+          key: `${palletId}|${idx}`, palletId, itemIdx: idx, item: it,
+          warnings: ws, maxSeverity: sev,
+        });
+      });
+    };
+    (current?.parsed?.pallets || []).forEach((p: any) => addItems(p.items || [], p.id));
+    addItems(current?.parsed?.einzelneSkuItems || [], 'ESKU');
+    return out;
+  }, [current?.parsed]);
+
+  const ackKey = `marathon.pruefen.parseAcks.${current?.id || 'none'}`;
+  const [acked, setAcked] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(ackKey);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+  });
+  const ackOne = (key: string) => {
+    setAcked((prev) => {
+      const next = new Set(prev); next.add(key);
+      try { localStorage.setItem(ackKey, JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  const ackAll = () => {
+    setAcked((prev) => {
+      const next = new Set(prev);
+      parseWarnings.forEach((w) => next.add(w.key));
+      try { localStorage.setItem(ackKey, JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  const blockingWarnings = parseWarnings.filter(
+    (w) => w.maxSeverity === 'high' && !acked.has(w.key),
+  );
+
+  /* ── Preflight briefing (same as classic) ────────────────────────── */
+  const briefing = useMemo(
+    () => analyzeAuftrag({
+      parsed: current?.parsed, validation, distribution, enrichedPallets, enrichedEsku,
+    }),
+    [current?.parsed, validation, distribution, enrichedPallets, enrichedEsku],
+  );
+
+  /* ── Search + filter (no sticky-toolbar logic in beta) ───────────── */
+  const [problemOnly, setProblemOnly] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const handleJumpToPallet = (palletId) => {
+    setTimeout(() => {
+      const el = document.getElementById(`pallet-row-${palletId}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 60);
+  };
+
+  const ranking = useMemo(
+    () => rankPallets(view?.pallets || [], palletStates),
+    [view?.pallets, palletStates],
+  );
+
+  const palletSearchIndex = useMemo(() => {
+    const idx = new Map<string, string>();
+    enrichedPallets.forEach((p: any) => {
+      const parts: string[] = [String(p.id || '').toLowerCase()];
+      const items = [...(p.items || []), ...(eskuDist?.[p.id] || [])];
+      items.forEach((it: any) => {
+        if (it.fnsku)   parts.push(String(it.fnsku).toLowerCase());
+        if (it.ean)     parts.push(String(it.ean).toLowerCase());
+        if (it.sku)     parts.push(String(it.sku).toLowerCase());
+        if (it.asin)    parts.push(String(it.asin).toLowerCase());
+        if (it.useItem) parts.push(String(it.useItem).toLowerCase());
+        if (it.title)   parts.push(String(it.title).toLowerCase());
+      });
+      idx.set(p.id, parts.join(' '));
+    });
+    return idx;
+  }, [enrichedPallets, eskuDist]);
+
+  const searchQ = searchQuery.trim().toLowerCase();
+
+  const visiblePallets = useMemo(() => {
+    let arr = view?.pallets || [];
+    if (problemOnly) {
+      arr = arr.filter((p) => {
+        const st = palletStates[p.id];
+        return st && Array.isArray(st.flags) && st.flags.length > 0;
+      });
+    }
+    if (searchQ) {
+      arr = arr.filter((p) => (palletSearchIndex.get(p.id) || '').includes(searchQ));
+    }
+    return arr;
+  }, [view?.pallets, palletStates, problemOnly, searchQ, palletSearchIndex]);
+
+  const hiddenByFilter = (view?.pallets?.length || 0) - visiblePallets.length;
+
+  /* ── Focus gate + keyboard (same as classic) ─────────────────────── */
+  const focusBlocked = validView.errors > 0 || blockingWarnings.length > 0;
+  const onStartFocus = () => { if (!focusBlocked) goToStep('focus'); };
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      const tag = t?.tagName;
+      const inField = tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable;
+      if (e.key === '/' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const input = document.querySelector<HTMLInputElement>('input[data-pruefen-search]');
+        if (input) { e.preventDefault(); input.focus(); input.select(); return; }
+      }
+      if (e.key !== 'f' && e.key !== 'F') return;
+      if (inField) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!focusBlocked) { e.preventDefault(); goToStep('focus'); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [focusBlocked, goToStep]);
+
+  /* ── Hinweise merge: briefing flags + parser warnings ────────────── */
+  const hinweise = useMemo(() => {
+    const rows: Array<{
+      key: string;
+      severity: 'high' | 'medium' | 'low';
+      position?: string;
+      title: string;
+      reasons: string[];
+      ackable: boolean;
+      ackKey?: string;
+      target?: { palletId?: string };
+    }> = [];
+
+    (briefing?.flags || []).forEach((f: any, i: number) => {
+      if (f.severity === 'ok') return;
+      const sev: 'high' | 'medium' | 'low' =
+        f.severity === 'error' ? 'high'
+        : f.severity === 'warn' ? 'medium'
+        : 'low';
+      rows.push({
+        key: `pf|${f.kind}|${f.code || i}|${f.target?.palletId || ''}`,
+        severity: sev,
+        position: f.target?.palletId,
+        title: f.message,
+        reasons: f.detail ? [f.detail] : [],
+        ackable: false,
+        target: f.target,
+      });
+    });
+
+    parseWarnings.forEach((w) => {
+      const reasons = (w.warnings || []).map((wi: any) => wi.msg || wi.message || String(wi.code || 'Unklar'));
+      const position = w.palletId === 'ESKU' ? `ESKU · #${w.itemIdx + 1}` : `${w.palletId} · #${w.itemIdx + 1}`;
+      const title = w.item?.useItem || w.item?.title || w.item?.fnsku || 'Artikel';
+      rows.push({
+        key: `pw|${w.key}`,
+        severity: w.maxSeverity,
+        position,
+        title,
+        reasons,
+        ackable: true,
+        ackKey: w.key,
+        target: { palletId: w.palletId !== 'ESKU' ? w.palletId : undefined },
+      });
+    });
+
+    return {
+      rows,
+      high: rows.filter((r) => r.severity === 'high'),
+      medium: rows.filter((r) => r.severity === 'medium'),
+      low: rows.filter((r) => r.severity === 'low'),
+    };
+  }, [briefing, parseWarnings]);
+
+  const hasHinweise = hinweise.rows.length > 0;
+  const unackedHigh = hinweise.high.filter((r) => !r.ackable || !acked.has(r.ackKey || '')).length;
+
+  /* ── Severity for identity eyebrow ───────────────────────────────── */
+  const severity: 'ok' | 'warn' | 'err' =
+    validView.errors > 0 ? 'err'
+    : validView.warnings > 0 || blockingWarnings.length > 0 ? 'warn'
+    : 'ok';
+
+  if (!view) {
+    return (
+      <Page>
+        <BetaPruefenStyles />
+        <main style={{ padding: '120px 32px', textAlign: 'center', color: T.text.subtle, fontFamily: T.font.ui }}>
+          <BetaPaperCard>
+            <BetaWhitePanel padding="48px 32px">
+              <div style={{ fontSize: 14, color: T.text.subtle }}>Kein Auftrag geladen.</div>
+            </BetaWhitePanel>
+          </BetaPaperCard>
+        </main>
+      </Page>
+    );
+  }
+
+  const stats = view.stats;
+
+  return (
+    <Page>
+      <BetaPruefenStyles />
+
+      <main style={{
+        maxWidth: 1080,
+        margin: '0 auto',
+        padding: '40px 32px 140px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        fontFamily: T.font.ui,
+      }}>
+
+        {/* ── IDENTITY ────────────────────────────────────────────── */}
+        <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) backwards' }}>
+          <BetaPaperCard>
+            <BetaWhitePanel padding="28px 32px">
+              <BetaEyebrow
+                color={severity === 'ok' ? T.status.success.text
+                      : severity === 'warn' ? T.status.warn.text
+                      : T.status.danger.text}
+                icon={severity === 'ok' ? <BetaCheckIcon />
+                     : severity === 'warn' ? <BetaWarnIcon />
+                     : <BetaXIcon />}
+              >
+                {severity === 'ok'
+                  ? 'Alles validiert'
+                  : severity === 'err'
+                    ? `${validView.errors} Fehler`
+                    : `${validView.warnings + unackedHigh} Hinweis${(validView.warnings + unackedHigh) === 1 ? '' : 'e'}`}
+              </BetaEyebrow>
+              <div style={{ marginTop: 10 }}>
+                <BetaBigCopy value={view.fba} rawValue={String(view.fba)} ariaLabel="FBA-Code" />
+              </div>
+              <div style={{
+                marginTop: 4,
+                display: 'flex',
+                gap: 10,
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                fontFamily: T.font.mono,
+                fontSize: 12,
+                color: T.text.subtle,
+                letterSpacing: '0.02em',
+              }}>
+                <span>{view.destination}</span>
+                {view.createdDate && (
+                  <>
+                    <BetaMetaDot />
+                    <span>{view.createdDate}{view.createdTime ? ' ' + view.createdTime : ''}</span>
+                  </>
+                )}
+              </div>
+
+              <div style={{ marginTop: 22 }}>
+                <BetaFingerprintBare
+                  pallets={view.pallets}
+                  palletStates={palletStates}
+                  onClick={handleJumpToPallet}
+                />
+              </div>
+
+              <div style={{ marginTop: 18 }}>
+                <BetaMetricsLine stats={stats} />
+              </div>
+            </BetaWhitePanel>
+          </BetaPaperCard>
+        </div>
+
+        {/* ── HINWEISE (only if anything to show) ─────────────────── */}
+        {hasHinweise && (
+          <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) 80ms backwards' }}>
+            <BetaHinweiseCard
+              hinweise={hinweise}
+              acked={acked}
+              onAckOne={ackOne}
+              onAckAll={ackAll}
+              onJumpToPallet={handleJumpToPallet}
+            />
+          </div>
+        )}
+
+        {/* ── PALETTEN ─────────────────────────────────────────────── */}
+        <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) 140ms backwards' }}>
+          <BetaPaperCard>
+            <BetaWhitePanel padding="18px 24px">
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}>
+                <BetaEyebrow>Paletten · {view.pallets.length}</BetaEyebrow>
+                <span style={{ flex: 1 }} />
+                <BetaSearchInput
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  placeholder="FNSKU · EAN · Titel · P-ID"
+                />
+                <BetaFilterChip
+                  active={problemOnly}
+                  onClick={() => setProblemOnly((v) => !v)}
+                >
+                  Nur Hinweise
+                </BetaFilterChip>
+              </div>
+              {(searchQ || problemOnly) && (
+                <div style={{
+                  marginTop: 8,
+                  fontSize: 11.5,
+                  color: T.text.faint,
+                  fontFamily: T.font.mono,
+                  letterSpacing: '0.04em',
+                }}>
+                  {searchQ
+                    ? (visiblePallets.length === 0
+                        ? `Keine Treffer für "${searchQuery}"`
+                        : `${visiblePallets.length} Treffer für "${searchQuery}"`)
+                    : (visiblePallets.length === 0
+                        ? 'Keine problematischen Paletten'
+                        : `${visiblePallets.length} mit Hinweisen · ${hiddenByFilter} ausgeblendet`)}
+                </div>
+              )}
+            </BetaWhitePanel>
+
+            {visiblePallets.length === 0 ? (
+              <BetaWhitePanel padding="32px 24px">
+                <div style={{
+                  textAlign: 'center',
+                  fontSize: 13,
+                  color: T.text.subtle,
+                  fontFamily: T.font.mono,
+                  letterSpacing: '0.02em',
+                }}>
+                  {problemOnly ? '✓ Keine problematischen Paletten' : `Keine Treffer für "${searchQuery}"`}
+                </div>
+              </BetaWhitePanel>
+            ) : (
+              visiblePallets.map((p) => {
+                const raw = enrichedPallets.find((r) => r.id === p.id);
+                const eskuAssigned = sortItemsForPallet(eskuDist[p.id] || []);
+                const palletState = palletStates[p.id];
+                return (
+                  <BetaWhitePanel key={p.id} padding="18px 22px">
+                    <BetaPalletBlock
+                      pallet={p}
+                      items={raw?.items || []}
+                      eskuAssigned={eskuAssigned}
+                      palletState={palletState}
+                    />
+                  </BetaWhitePanel>
+                );
+              })
+            )}
+          </BetaPaperCard>
+        </div>
+      </main>
+
+      <BetaFocusPill
+        isBlocked={focusBlocked}
+        stats={stats}
+        unackedHigh={unackedHigh}
+        validErrors={validView.errors}
+        onStartFocus={onStartFocus}
+      />
+    </Page>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Beta atoms — local, mirror Upload.tsx / Abschluss.tsx pattern.
+   ────────────────────────────────────────────────────────────────────── */
+
+function BetaPruefenStyles() {
+  return (
+    <style>{`
+      @keyframes mp-prf-rise {
+        0%   { opacity: 0; transform: translateY(8px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes mr-spin {
+        0%   { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    `}</style>
+  );
+}
+
+function BetaPaperCard({ children }) {
+  return (
+    <div style={{
+      padding: 8,
+      background: '#F4F5F7',
+      border: '2px solid #FFFFFF',
+      borderRadius: 32,
+      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaWhitePanel({ children, padding, id }: { children?: React.ReactNode; padding?: string; id?: string }) {
+  return (
+    <div id={id} style={{
+      background: '#FFFFFF',
+      borderRadius: 24,
+      padding: padding || '22px 26px',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaEyebrow({ children, color, icon }: { children?: React.ReactNode; color?: string; icon?: React.ReactNode }) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 10.5,
+      fontWeight: 700,
+      fontFamily: T.font.mono,
+      color: color || T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.18em',
+    }}>
+      {icon}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function BetaCheckIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+      <path d="M2.5 6.5l2 2 5-5.5" stroke="currentColor" strokeWidth="2.2"
+            strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BetaWarnIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+      <path d="M6 1.5L11 10H1z" stroke="currentColor" strokeWidth="1.6"
+            strokeLinejoin="round" />
+      <path d="M6 5v2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="6" cy="9" r="0.55" fill="currentColor" />
+    </svg>
+  );
+}
+
+function BetaXIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none"
+         stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M3 3l6 6M9 3l-6 6" />
+    </svg>
+  );
+}
+
+function BetaMetaDot() {
+  return (
+    <span aria-hidden style={{
+      width: 3, height: 3, borderRadius: '50%',
+      background: 'rgba(15, 23, 42, 0.22)',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function BetaKbd({ children }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 22, height: 20,
+      padding: '0 7px',
+      fontSize: 10.5,
+      fontFamily: T.font.mono,
+      fontWeight: 700,
+      color: '#FFFFFF',
+      background: 'rgba(255, 255, 255, 0.22)',
+      borderRadius: 6,
+      lineHeight: 1,
+      letterSpacing: '0.04em',
+    }}>{children}</span>
+  );
+}
+
+/* Big mono FBA-code click-to-copy — mirror of Abschluss/Upload variant. */
+function BetaBigCopy({ value, rawValue, ariaLabel }: { value: React.ReactNode; rawValue: string; ariaLabel?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = (e) => {
+    e.stopPropagation();
+    betaCopyToClipboard(rawValue);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => { onClick(e); e.currentTarget.blur(); }}
+      title={copied ? 'Kopiert' : 'Klick zum Kopieren'}
+      aria-label={ariaLabel}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: '8px 12px',
+        marginLeft: -12,
+        background: copied ? T.status.success.bg : 'transparent',
+        borderRadius: 14,
+        transition: 'background 220ms ease',
+      }}
+    >
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 'clamp(28px, 3.6vw, 40px)',
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.primary,
+        letterSpacing: '-0.025em',
+        lineHeight: 1.05,
+        wordBreak: 'break-all',
+        transition: 'color 220ms ease',
+      }}>
+        {value}
+      </span>
+      {copied && (
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 10,
+          fontWeight: 600,
+          color: T.status.success.text,
+          letterSpacing: '0.10em',
+          textTransform: 'uppercase',
+        }}>
+          ✓ Kopiert
+        </span>
+      )}
+    </button>
+  );
+}
+
+function BetaPalletBlock({ pallet, items, eskuAssigned, palletState }) {
+  const lvl = pallet.level;
+  const meta = lvl != null ? LEVEL_META[lvl] : null;
+  const fillPct = Math.round((palletState?.fillPct ?? pallet.fillPct ?? 0) * 100);
+  const totalArticles = (items?.length || 0) + (eskuAssigned?.length || 0);
+  const totalUnits = [...(items || []), ...(eskuAssigned || [])]
+    .reduce((s, it) => s + (it?.units || 0), 0);
+  const isSingleSku = pallet.isSingleSku === true;
+
+  return (
+    <section
+      id={`pallet-row-${pallet.id}`}
+      style={{
+        scrollMarginTop: 120,
+        display: 'grid',
+        gridTemplateColumns: '80px 1fr',
+        gap: 18,
+        alignItems: 'start',
+        animation: 'mp-prf-rise 380ms cubic-bezier(0.16,1,0.3,1) backwards',
+      }}
+    >
+      {/* Stack-viz column — vertical pallet visualization with level stripes */}
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 6,
+        paddingTop: 4,
+      }}>
+        <PalletStackViz palletState={palletState} size="mini" radius={14} />
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 10.5,
+          fontWeight: 600,
+          color: T.text.faint,
+          letterSpacing: '0.04em',
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          {fillPct}%
+        </span>
+      </div>
+
+      {/* Right column — header + article list */}
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        {/* Pallet header */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          flexWrap: 'wrap',
+          padding: '4px 4px 10px',
+        }}>
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 16,
+            fontWeight: 700,
+            color: T.text.primary,
+            letterSpacing: '-0.01em',
+          }}>
+            {shortPalletId(pallet)}
+          </span>
+          {meta && (
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 10.5,
+              fontWeight: 600,
+              padding: '3px 9px',
+              background: meta.bg,
+              color: meta.text,
+              borderRadius: 999,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+            }}>
+              L{lvl} {meta.shortName || meta.name}
+            </span>
+          )}
+          {isSingleSku && (
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 10,
+              fontWeight: 700,
+              color: T.status.warn.text,
+              letterSpacing: '0.14em',
+              textTransform: 'uppercase',
+            }}>
+              4-Seiten-Warnung
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 11,
+            fontWeight: 500,
+            color: T.text.faint,
+            fontVariantNumeric: 'tabular-nums',
+            letterSpacing: '0.04em',
+          }}>
+            {totalArticles} Art · {totalUnits} Stk
+          </span>
+        </div>
+
+        {/* Article list */}
+        <ul style={{
+          listStyle: 'none',
+          margin: 0,
+          padding: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          {(items || []).map((it, j) => (
+            <BetaArticleRow key={`m-${j}`} item={it} pos={j + 1} />
+          ))}
+          {(eskuAssigned || []).map((it, j) => (
+            <BetaArticleRow key={`e-${j}`} item={it} pos={(items?.length || 0) + j + 1} isEsku />
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
+function BetaArticleRow({ item, pos, isEsku = false }) {
+  const lvl = getDisplayLevel(item) || item.level || 1;
+  const meta = LEVEL_META[lvl] || LEVEL_META[1];
+  const units = item.units;
+
+  return (
+    <li style={{
+      listStyle: 'none',
+      background: '#FFFFFF',
+      borderRadius: 14,
+      overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '34px 64px minmax(80px, auto) 1fr minmax(120px, auto)',
+        alignItems: 'center',
+        gap: 12,
+        padding: '11px 14px',
+      }}>
+        {/* Position number */}
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 11,
+          fontWeight: 500,
+          color: T.text.faint,
+          fontVariantNumeric: 'tabular-nums',
+          textAlign: 'right',
+        }}>
+          {String(pos).padStart(2, '0')}
+        </span>
+
+        {/* Units */}
+        <span
+          title={units != null ? `${units} Stück` : 'Menge nicht erkannt'}
+          style={{
+            fontFamily: T.font.mono,
+            fontSize: 12,
+            fontWeight: 600,
+            color: units != null ? T.text.primary : T.text.faint,
+            fontVariantNumeric: 'tabular-nums',
+            textAlign: 'right',
+          }}
+        >
+          {units != null ? `× ${units}` : '—'}
+        </span>
+
+        {/* Level pill */}
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 10.5,
+          fontWeight: 600,
+          padding: '2px 8px',
+          background: meta.bg,
+          color: meta.text,
+          borderRadius: 999,
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          justifySelf: 'start',
+          whiteSpace: 'nowrap',
+        }}>
+          L{lvl} {meta.shortName || meta.name}
+        </span>
+
+        {/* Title — single line truncate */}
+        <span
+          title={item.title || ''}
+          style={{
+            fontSize: 13,
+            fontWeight: 400,
+            color: T.text.primary,
+            letterSpacing: '-0.005em',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {formatItemTitle(item.title || '—')}
+        </span>
+
+        {/* Code — ESKU shows sku + fnsku stacked; Mixed shows single code line */}
+        {isEsku || item.isEinzelneSku ? (
+          <span
+            title={[item.sku, item.fnsku].filter(Boolean).join(' · ') || ''}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 2,
+              minWidth: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 12,
+              fontWeight: 600,
+              color: T.text.primary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: '100%',
+            }}>
+              {item.sku || item.fnsku || '—'}
+            </span>
+            {item.sku && item.fnsku && item.fnsku !== item.sku && (
+              <span style={{
+                fontFamily: T.font.mono,
+                fontSize: 10.5,
+                color: T.text.faint,
+                letterSpacing: '0.02em',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                maxWidth: '100%',
+              }}>
+                {item.fnsku}
+              </span>
+            )}
+          </span>
+        ) : (
+          <span
+            title={item.code || item.useItem || item.fnsku || ''}
+            style={{
+              fontFamily: T.font.mono,
+              fontSize: 12,
+              color: T.text.subtle,
+              textAlign: 'right',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {item.code || item.useItem || item.fnsku || '—'}
+          </span>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function shortPalletId(p) {
+  if (!p) return '';
+  if (typeof p === 'string') {
+    const m = p.match(/^([A-Za-z]+\d+)/);
+    return m ? m[1] : p;
+  }
+  if (typeof p.number === 'number') return `P${p.number}`;
+  return shortPalletId(p.id || '');
+}
+
+function BetaFingerprintBare({ pallets, palletStates, onClick }) {
+  if (!pallets || pallets.length === 0) return null;
+  return (
+    <div style={{
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 12,
+    }}>
+      {pallets.map((p) => (
+        <BetaFingerprintCell
+          key={p.id}
+          pallet={p}
+          state={palletStates?.[p.id]}
+          onClick={() => onClick(p.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function BetaFingerprintCell({ pallet, state, onClick }) {
+  const [hover, setHover] = useState(false);
+  const lvl = pallet.level;
+  const meta = lvl != null ? LEVEL_META[lvl] : null;
+  const baseColor = meta?.color || T.bg.surface3;
+  const hasFlag = state && Array.isArray(state.flags) && state.flags.length > 0;
+  const rawFill = state?.fillPct ?? pallet.fillPct ?? 0;
+  const fillPct = Math.max(0, Math.min(1, rawFill));
+  const overFill = rawFill > 1;
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={`${pallet.id} · ${meta?.name || 'Unbekannt'} · ${Math.round(rawFill * 100)}% Füllung${hasFlag ? ' · ' + state.flags.length + ' Hinweis(e)' : ''}`}
+      style={{
+        position: 'relative',
+        width: 44,
+        height: 63,
+        background: `${baseColor}1F`,
+        border: 0,
+        borderRadius: 12,
+        cursor: 'pointer',
+        padding: 0,
+        flexShrink: 0,
+        overflow: 'hidden',
+        transition: 'transform 180ms cubic-bezier(0.16, 1, 0.3, 1), filter 180ms ease',
+        transform: hover ? 'translateY(-2px)' : 'translateY(0)',
+        filter: hover ? 'brightness(1.06)' : 'none',
+      }}
+    >
+      {/* Fill from bottom up to fillPct */}
+      <span
+        aria-hidden
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: `${fillPct * 100}%`,
+          background: overFill ? T.status.danger.main : baseColor,
+          transition: 'height 480ms cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      />
+      {hasFlag && (
+        <span style={{
+          position: 'absolute',
+          top: 6, right: 6,
+          width: 8, height: 8,
+          borderRadius: '50%',
+          background: T.status.warn.main,
+          border: `2px solid #FFFFFF`,
+        }} />
+      )}
+    </button>
+  );
+}
+
+function BetaMetricsLine({ stats }) {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: 0,
+    }}>
+      <BetaMetric value={stats.palletCount} label="Paletten" />
+      <BetaMetricSep />
+      <BetaMetric value={stats.articles} label="Artikel" />
+      <BetaMetricSep />
+      <BetaMetric value={stats.weightKg.toLocaleString('de-DE')} label="kg" />
+    </div>
+  );
+}
+
+function BetaMetric({ value, label }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'baseline',
+      gap: 6,
+      padding: '0 4px',
+    }}>
+      <span style={{
+        fontSize: 16,
+        fontWeight: 600,
+        color: T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        letterSpacing: '-0.012em',
+      }}>
+        {value}
+      </span>
+      <span style={{
+        fontSize: 10.5,
+        color: T.text.faint,
+        textTransform: 'uppercase',
+        letterSpacing: '0.08em',
+        fontFamily: T.font.mono,
+        fontWeight: 600,
+      }}>
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function BetaMetricSep() {
+  return (
+    <span style={{
+      width: 1,
+      height: 16,
+      background: T.border.primary,
+      margin: '0 14px',
+    }} />
+  );
+}
+
+function BetaSearchInput({ value, onChange, placeholder }) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '8px 14px',
+      background: '#F4F5F7',
+      borderRadius: 999,
+      minWidth: 240,
+    }}>
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none"
+           stroke={T.text.faint} strokeWidth="1.6" strokeLinecap="round">
+        <circle cx="6" cy="6" r="4" />
+        <path d="M9 9l3 3" />
+      </svg>
+      <input
+        data-pruefen-search
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          all: 'unset',
+          flex: 1,
+          fontFamily: T.font.ui,
+          fontSize: 12.5,
+          color: T.text.primary,
+          minWidth: 0,
+        }}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          aria-label="Suche leeren"
+          style={{
+            all: 'unset',
+            cursor: 'pointer',
+            color: T.text.faint,
+            display: 'inline-flex',
+            padding: 2,
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none"
+               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M3 3l6 6M9 3l-6 6" />
+          </svg>
+        </button>
+      )}
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: T.text.faint,
+        background: '#FFFFFF',
+        borderRadius: 4,
+        padding: '2px 6px',
+        letterSpacing: '0.04em',
+      }}>
+        /
+      </span>
+    </div>
+  );
+}
+
+function BetaFilterChip({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 7,
+        padding: '8px 14px',
+        background: active ? T.accent.bg : '#F4F5F7',
+        borderRadius: 999,
+        fontFamily: T.font.ui,
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: active ? T.accent.text : T.text.subtle,
+        letterSpacing: '-0.005em',
+        transition: 'background 200ms ease, color 200ms ease',
+      }}
+    >
+      <span style={{
+        width: 6, height: 6,
+        borderRadius: '50%',
+        background: active ? 'var(--accent)' : T.text.faint,
+      }} />
+      {children}
+    </button>
+  );
+}
+
+function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet }) {
+  const total = hinweise.rows.length;
+  const worstSev: 'high' | 'medium' | 'low' =
+    hinweise.high.length > 0 ? 'high'
+    : hinweise.medium.length > 0 ? 'medium'
+    : 'low';
+  const sevColor = worstSev === 'high' ? T.status.danger.text
+    : worstSev === 'medium' ? T.status.warn.text
+    : T.text.subtle;
+  const sevIcon = worstSev === 'high' ? <BetaXIcon />
+    : worstSev === 'medium' ? <BetaWarnIcon />
+    : null;
+
+  const hasUnackedAckable = hinweise.rows.some((r) => r.ackable && !acked.has(r.ackKey || ''));
+  const [open, setOpen] = useState(false);
+
+  return (
+    <BetaPaperCard>
+      <BetaWhitePanel padding={open ? '22px 26px' : '14px 22px'}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          style={{
+            all: 'unset',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            width: '100%',
+          }}
+        >
+          <BetaEyebrow color={sevColor} icon={sevIcon}>
+            {total} Hinweis{total === 1 ? '' : 'e'}
+          </BetaEyebrow>
+
+          {!open && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              {hinweise.high.length > 0 && (
+                <BetaHinweiseCountChip
+                  count={hinweise.high.length}
+                  color={T.status.danger.main}
+                  bg={T.status.danger.bg}
+                />
+              )}
+              {hinweise.medium.length > 0 && (
+                <BetaHinweiseCountChip
+                  count={hinweise.medium.length}
+                  color={T.status.warn.main}
+                  bg={T.status.warn.bg}
+                />
+              )}
+              {hinweise.low.length > 0 && (
+                <BetaHinweiseCountChip
+                  count={hinweise.low.length}
+                  color={T.text.faint}
+                  bg={T.bg.surface2}
+                />
+              )}
+            </div>
+          )}
+
+          <span style={{ flex: 1 }} />
+
+          <span
+            aria-hidden
+            style={{
+              display: 'inline-flex',
+              transition: 'transform 220ms cubic-bezier(0.16,1,0.3,1)',
+              transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+              color: T.text.faint,
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M3.5 5.5L7 9l3.5-3.5" stroke="currentColor"
+                    strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+        </button>
+
+        {open && (
+          <>
+            {hinweise.high.length > 0 && (
+              <BetaHinweiseGroup
+                label="Blockierend"
+                color={T.status.danger.text}
+                rows={hinweise.high}
+                acked={acked}
+                onAckOne={onAckOne}
+                onJumpToPallet={onJumpToPallet}
+              />
+            )}
+            {hinweise.medium.length > 0 && (
+              <BetaHinweiseGroup
+                label="Warnungen"
+                color={T.status.warn.text}
+                rows={hinweise.medium}
+                acked={acked}
+                onAckOne={onAckOne}
+                onJumpToPallet={onJumpToPallet}
+              />
+            )}
+            {hinweise.low.length > 0 && (
+              <BetaHinweiseGroup
+                label="Informationen"
+                color={T.text.subtle}
+                rows={hinweise.low}
+                acked={acked}
+                onAckOne={onAckOne}
+                onJumpToPallet={onJumpToPallet}
+              />
+            )}
+
+            {hasUnackedAckable && (
+              <div style={{ marginTop: 14, textAlign: 'right' }}>
+                <button
+                  type="button"
+                  onClick={onAckAll}
+                  style={betaGhostLinkStyle}
+                >
+                  Alle akzeptieren
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </BetaWhitePanel>
+    </BetaPaperCard>
+  );
+}
+
+function BetaHinweiseCountChip({ count, color, bg }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '3px 9px',
+      background: bg,
+      borderRadius: 999,
+      fontFamily: T.font.mono,
+      fontSize: 11,
+      fontWeight: 700,
+      color,
+      letterSpacing: '0.02em',
+      fontVariantNumeric: 'tabular-nums',
+    }}>
+      <span style={{
+        width: 5, height: 5,
+        borderRadius: '50%',
+        background: color,
+      }} />
+      {count}
+    </span>
+  );
+}
+
+function BetaHinweiseGroup({ label, color, rows, acked, onAckOne, onJumpToPallet }) {
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{
+        fontFamily: T.font.mono,
+        fontSize: 10,
+        fontWeight: 700,
+        color,
+        textTransform: 'uppercase',
+        letterSpacing: '0.16em',
+        marginBottom: 8,
+      }}>
+        {label} · {rows.length}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {rows.map((r) => (
+          <BetaHinweiseRow
+            key={r.key}
+            row={r}
+            isAcked={r.ackable ? acked.has(r.ackKey || '') : false}
+            onAck={() => r.ackKey && onAckOne(r.ackKey)}
+            onJumpToPallet={onJumpToPallet}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BetaHinweiseRow({ row, isAcked, onAck, onJumpToPallet }) {
+  const bgColor = row.severity === 'high' ? T.status.danger.bg
+    : row.severity === 'medium' ? T.status.warn.bg
+    : T.bg.surface2;
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '1fr auto',
+      gap: 12,
+      padding: '14px 18px',
+      background: bgColor,
+      borderRadius: 16,
+      opacity: isAcked ? 0.55 : 1,
+      transition: 'opacity 220ms ease',
+    }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 8,
+          flexWrap: 'wrap',
+        }}>
+          {row.position && (
+            <button
+              type="button"
+              onClick={() => row.target?.palletId && onJumpToPallet(row.target.palletId)}
+              disabled={!row.target?.palletId}
+              style={{
+                all: 'unset',
+                cursor: row.target?.palletId ? 'pointer' : 'default',
+                fontFamily: T.font.mono,
+                fontSize: 11.5,
+                fontWeight: 700,
+                color: T.text.subtle,
+                letterSpacing: '0.04em',
+                textDecoration: row.target?.palletId ? 'underline dotted' : 'none',
+                textUnderlineOffset: 2,
+              }}
+            >
+              {row.position}
+            </button>
+          )}
+          <span style={{
+            fontSize: 13,
+            fontWeight: 500,
+            color: T.text.primary,
+            letterSpacing: '-0.005em',
+            minWidth: 0,
+          }}>
+            {row.title}
+          </span>
+        </div>
+        {row.reasons && row.reasons.length > 0 && (
+          <div style={{
+            fontSize: 11.5,
+            color: T.text.subtle,
+            lineHeight: 1.45,
+            letterSpacing: '-0.005em',
+          }}>
+            {row.reasons.join(' · ')}
+          </div>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+        {row.ackable && (
+          isAcked ? (
+            <span style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 10.5,
+              fontWeight: 700,
+              fontFamily: T.font.mono,
+              color: T.status.success.text,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+            }}>
+              <BetaCheckIcon /> Akzeptiert
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={onAck}
+              style={{
+                all: 'unset',
+                cursor: 'pointer',
+                fontFamily: T.font.ui,
+                fontSize: 11.5,
+                fontWeight: 600,
+                color: T.text.primary,
+                padding: '5px 12px',
+                background: '#FFFFFF',
+                borderRadius: 999,
+                letterSpacing: '-0.005em',
+              }}
+            >
+              Akzeptieren
+            </button>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BetaFocusPill({ isBlocked, stats, unackedHigh, validErrors, onStartFocus }) {
+  const message = validErrors > 0
+    ? `${validErrors} Fehler — Validierung nötig`
+    : unackedHigh > 0
+      ? `${unackedHigh} Hinweis${unackedHigh === 1 ? '' : 'e'} offen`
+      : `Bereit · ${stats.palletCount} Pal · ${stats.articles} Art`;
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 18,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      marginLeft: 'calc(var(--sidebar-width) / 2)',
+      zIndex: 50,
+      background: '#F8F8F8',
+      border: '2px solid #FFFFFF',
+      borderRadius: 50,
+      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+      padding: '6px 6px 6px 22px',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 18,
+      whiteSpace: 'nowrap',
+      fontFamily: T.font.ui,
+      animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) 200ms backwards',
+    }}>
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        fontFamily: T.font.mono,
+        fontSize: 11.5,
+        fontWeight: 600,
+        color: T.text.subtle,
+        letterSpacing: '0.04em',
+      }}>
+        <span aria-hidden style={{
+          width: 6, height: 6,
+          borderRadius: '50%',
+          background: isBlocked ? T.status.warn.main : T.accent.main,
+          boxShadow: `0 0 0 3px ${(isBlocked ? T.status.warn.main : T.accent.main) + '22'}`,
+        }} />
+        <span style={{
+          color: T.text.primary,
+          fontWeight: 700,
+        }}>
+          {message}
+        </span>
+      </span>
+      <button
+        type="button"
+        onClick={onStartFocus}
+        disabled={isBlocked}
+        title={isBlocked ? 'Hinweise zuerst akzeptieren' : 'Focus-Modus starten (F)'}
+        style={{
+          ...betaAccentPillStyle,
+          opacity: isBlocked ? 0.5 : 1,
+          cursor: isBlocked ? 'not-allowed' : 'pointer',
+        }}
+        onMouseEnter={isBlocked ? undefined : betaAccentPillHover}
+        onMouseLeave={isBlocked ? undefined : betaAccentPillLeave}
+      >
+        Focus
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <path d="M3 7h8m0 0L7.5 3.5M11 7l-3.5 3.5" stroke="currentColor"
+                strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <BetaKbd>F</BetaKbd>
+      </button>
+    </div>
+  );
+}
+
+/* ── shared beta styles ──────────────────────────────────────────────── */
+const betaAccentPillStyle: React.CSSProperties = {
+  all: 'unset',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 10,
+  padding: '11px 22px',
+  background: 'var(--accent)',
+  color: '#FFFFFF',
+  borderRadius: 999,
+  fontFamily: T.font.ui,
+  fontSize: 14,
+  fontWeight: 600,
+  letterSpacing: '-0.005em',
+  cursor: 'pointer',
+  transition: 'transform 200ms cubic-bezier(0.16, 1, 0.3, 1), filter 200ms ease',
+};
+
+function betaAccentPillHover(e: React.MouseEvent<HTMLButtonElement>) {
+  e.currentTarget.style.transform = 'translateY(-1px)';
+  e.currentTarget.style.filter = 'brightness(1.05)';
+}
+
+function betaAccentPillLeave(e: React.MouseEvent<HTMLButtonElement>) {
+  e.currentTarget.style.transform = 'none';
+  e.currentTarget.style.filter = 'none';
+}
+
+const betaGhostLinkStyle: React.CSSProperties = {
+  all: 'unset',
+  cursor: 'pointer',
+  fontFamily: T.font.ui,
+  fontSize: 12.5,
+  fontWeight: 500,
+  color: T.text.subtle,
+  letterSpacing: '-0.005em',
+  padding: '4px 8px',
+  textDecoration: 'underline dotted',
+  textUnderlineOffset: 3,
+};
+
+function betaCopyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackBetaCopy(text));
+    return;
+  }
+  fallbackBetaCopy(text);
+}
+function fallbackBetaCopy(text: string) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '0';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch { /* ignore */ }
 }

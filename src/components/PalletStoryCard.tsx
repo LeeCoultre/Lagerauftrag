@@ -32,6 +32,7 @@ const PALLET_WEIGHT_KG = 700;
 export default function PalletStoryCard({
   pallet, story, items, eskuAssigned, palletState,
   allPallets, palletStates, eskuDist, eskuOverrides, onMoveEsku,
+  bare = false,
 }) {
   const [showAllItems, setShowAllItems] = useState(false);
   const [hover, setHover] = useState(false);
@@ -59,7 +60,19 @@ export default function PalletStoryCard({
       id={`pallet-row-${pallet.id}`}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{
+      style={bare ? {
+        position: 'relative',
+        padding: 0,
+        background: 'transparent',
+        border: 0,
+        borderRadius: 0,
+        scrollMarginTop: 120,
+        display: 'grid',
+        gridTemplateColumns: '100px 1fr',
+        gap: 24,
+        boxShadow: 'none',
+        transition: 'none',
+      } : {
         position: 'relative',
         padding: 24,
         background: T.bg.surface,

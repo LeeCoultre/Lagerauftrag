@@ -19,7 +19,6 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { useAppState } from '@/state.jsx';
 import { useMe } from '@/hooks/useMe.js';
 import { useApiHealth } from '@/hooks/useApiHealth.js';
-import { useMyShift } from '@/hooks/useMyShift.js';
 import { Mark } from './Logo.jsx';
 import { T } from './ui.jsx';
 import { UserSwitcher } from './UserSwitcher.jsx';
@@ -108,21 +107,21 @@ export function Sidebar({ route, onRoute, onOpenCommand }) {
 
   return (
     <aside style={beta ? {
-      /* Beta island sidebar — clean white floating panel on top of the
-         page-level paper bg. 12px gap on all sides, rounded corners,
-         subtle border + soft elevation. The `--sidebar-width` CSS var
-         (set by the collapsed hook) covers only the body width —
-         AppShell adds extra left padding for the floating gap so
-         content doesn't slide under the island. */
+      /* Beta island sidebar — shares the visual language of FlowHero /
+         BetaIslandBar: paper-grey #F4F5F7 fill, 2px white rim, soft
+         halo shadow. The `--sidebar-width` CSS var (set by the
+         collapsed hook) covers only the body width — AppShell adds
+         extra left padding for the floating gap so content doesn't
+         slide under the island. */
       position: 'fixed',
       top: 12,
       left: 12,
       bottom: 12,
       width,
-      background: '#FFFFFF',
-      border: `1px solid ${T.border.subtle}`,
-      borderRadius: 24,
-      boxShadow: '0 6px 20px -8px rgba(15, 23, 42, 0.05), 0 1px 3px -1px rgba(15, 23, 42, 0.03)',
+      background: '#F4F5F7',
+      border: '2px solid #FFFFFF',
+      borderRadius: 32,
+      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
       display: 'flex',
       flexDirection: 'column',
       zIndex: 20,
@@ -175,7 +174,6 @@ export function Sidebar({ route, onRoute, onOpenCommand }) {
       <SidebarFooter
         collapsed={collapsed}
         history={history}
-        onOpenCommand={onOpenCommand}
       />
     </aside>
   );
@@ -228,17 +226,7 @@ const STATUS_TONE = {
 };
 
 function WorkspaceHeader({ collapsed, onToggle }) {
-  const me = useMe().data;
   const healthQ = useApiHealth();
-  const shiftQ = useMyShift();
-  const [, forceTick] = useState(0);
-
-  useEffect(() => {
-    if (!shiftQ.data?.startedAt) return undefined;
-    const id = setInterval(() => forceTick((n) => n + 1), 1000);
-    return () => clearInterval(id);
-  }, [shiftQ.data?.startedAt]);
-
   const status = healthQ.data?.status || 'offline';
   const tone = STATUS_TONE[status] || STATUS_TONE.offline;
   const elapsedMs = healthQ.data?.elapsedMs;
@@ -247,14 +235,10 @@ function WorkspaceHeader({ collapsed, onToggle }) {
     : status === 'degraded' ? 'API ok, DB nicht erreichbar'
     : 'Backend nicht erreichbar';
 
-  const shiftSec = computeLiveShiftSec(shiftQ.data);
-  const shiftLabel = shiftSec != null ? formatHMS(shiftSec) : '—';
-  const initial = (me?.name || '·').trim().charAt(0).toUpperCase();
-
   return (
     <div style={{
       padding: collapsed ? '18px 0 10px' : '18px 16px 14px',
-      borderBottom: `1px solid ${T.border.primary}`,
+      borderBottom: `1px solid ${T.border.subtle}`,
       display: 'flex',
       flexDirection: 'column',
       alignItems: collapsed ? 'center' : 'stretch',
@@ -316,57 +300,6 @@ function WorkspaceHeader({ collapsed, onToggle }) {
         )}
       </div>
 
-      {!collapsed && me && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 9,
-          padding: '7px 10px',
-          background: T.bg.surface2,
-          border: `1px solid ${T.border.primary}`,
-          borderRadius: 8,
-        }}>
-          <span style={{
-            width: 20,
-            height: 20,
-            borderRadius: '50%',
-            background: T.accent.main,
-            color: '#fff',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 10,
-            fontWeight: 600,
-            flexShrink: 0,
-            letterSpacing: 0,
-          }}>
-            {initial}
-          </span>
-          <div style={{ flex: 1, minWidth: 0, lineHeight: 1.15 }}>
-            <div style={{
-              fontSize: 11.5,
-              fontWeight: 500,
-              color: T.text.primary,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}>
-              {me.name}
-            </div>
-            <div style={{
-              fontSize: 9.5,
-              color: T.text.faint,
-              fontVariantNumeric: 'tabular-nums',
-              fontFamily: T.font.mono,
-              marginTop: 1,
-              letterSpacing: '0.04em',
-            }}>
-              {shiftLabel}
-            </div>
-          </div>
-        </div>
-      )}
-
       <CollapseToggle collapsed={collapsed} onClick={onToggle} />
     </div>
   );
@@ -389,8 +322,8 @@ function CollapseToggle({ collapsed, onClick }) {
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: T.bg.surface,
-        border: `1px solid ${T.border.primary}`,
+        background: '#FFFFFF',
+        border: '1px solid transparent',
         borderRadius: '50%',
         color: T.text.faint,
         cursor: 'pointer',
@@ -399,11 +332,9 @@ function CollapseToggle({ collapsed, onClick }) {
         zIndex: 1,
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = T.text.subtle;
         e.currentTarget.style.color = T.text.secondary;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = T.border.primary;
         e.currentTarget.style.color = T.text.faint;
       }}
     >
@@ -429,24 +360,22 @@ function QuickSearchRail({ onOpen }) {
       onClick={onOpen}
       style={{
         margin: '12px 12px 4px',
-        padding: '7px 10px',
+        padding: '8px 12px',
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        background: T.bg.surface2,
-        border: `1px solid ${T.border.primary}`,
-        borderRadius: 8,
+        background: '#FFFFFF',
+        border: '1px solid transparent',
+        borderRadius: 12,
         cursor: 'pointer',
         fontFamily: T.font.ui,
-        transition: 'background 160ms, border-color 160ms',
+        transition: 'background 160ms',
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.background = T.bg.surface3;
-        e.currentTarget.style.borderColor = T.border.strong;
+        e.currentTarget.style.background = T.bg.surface2;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = T.bg.surface2;
-        e.currentTarget.style.borderColor = T.border.primary;
+        e.currentTarget.style.background = '#FFFFFF';
       }}
     >
       <span style={{ color: T.text.faint, display: 'inline-flex' }}>
@@ -583,10 +512,10 @@ function NavItem({ item, active, onClick, collapsed }) {
         width: '100%',
         padding: collapsed ? '11px 0' : '9px 12px 9px 16px',
         background: active
-          ? T.bg.surface3
-          : (hover ? T.bg.surface2 : 'transparent'),
+          ? '#FFFFFF'
+          : (hover ? 'rgba(255, 255, 255, 0.55)' : 'transparent'),
         border: 0,
-        borderRadius: 6,
+        borderRadius: 12,
         cursor: 'pointer',
         textAlign: 'left',
         transition: 'background 140ms cubic-bezier(0.16, 1, 0.3, 1)',
@@ -834,18 +763,18 @@ function CurrentProgress({ current, collapsed, onClick }) {
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
-        padding: '10px 12px',
+        padding: '12px 14px',
         margin: '0 12px 8px',
-        background: T.bg.surface2,
-        border: `1px solid ${T.border.primary}`,
-        borderRadius: 8,
+        background: '#FFFFFF',
+        border: '1px solid transparent',
+        borderRadius: 14,
         cursor: 'pointer',
         textAlign: 'left',
         fontFamily: T.font.ui,
-        transition: 'all 160ms',
+        transition: 'transform 160ms cubic-bezier(0.16, 1, 0.3, 1)',
       }}
-      onMouseEnter={(e) => { e.currentTarget.style.borderColor = T.accent.border; }}
-      onMouseLeave={(e) => { e.currentTarget.style.borderColor = T.border.primary; }}
+      onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{
@@ -943,64 +872,126 @@ function CurrentProgress({ current, collapsed, onClick }) {
 /* ════════════════════════════════════════════════════════════════════════
    FOOTER — UserSwitcher row + Today pulse + ⌘K iconlet.
    ════════════════════════════════════════════════════════════════════════ */
-function SidebarFooter({ collapsed, history, onOpenCommand }) {
+function SidebarFooter({ collapsed, history }) {
   return (
     <div>
       {!collapsed && <TodayPulse history={history} />}
+      <BetaTumblerRow collapsed={collapsed} />
       <UserSwitcher collapsed={collapsed} />
-      {!collapsed && onOpenCommand && (
-        <CommandLauncher onClick={onOpenCommand} />
-      )}
     </div>
   );
 }
 
-function CommandLauncher({ onClick }) {
-  const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
+/* Beta-design toggle as iOS-style tumbler. Replaces the BetaToggle that
+   used to live in Focus topbar/menu — now available app-wide from the
+   sidebar so the worker can flip designs without entering Focus.
+
+   Visually matches NavItem grammar: rounded white pill when "on",
+   transparent with subtle hover otherwise. Tumbler on the right
+   mirrors the iOS switch — knob slides + accent fill when on. */
+function BetaTumblerRow({ collapsed }: { collapsed: boolean }) {
+  const { beta, toggleBeta } = useBetaDesign();
+  const [hover, setHover] = useState(false);
+
+  if (collapsed) {
+    return (
+      <div style={{ padding: '8px 0', display: 'flex', justifyContent: 'center' }}>
+        <BetaTumbler on={beta} onToggle={toggleBeta} compact />
+      </div>
+    );
+  }
+
   return (
-    <button
-      onClick={onClick}
+    <div style={{ padding: '4px 8px 8px' }}>
+      <button
+        type="button"
+        onClick={toggleBeta}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        aria-pressed={beta}
+        title={beta
+          ? 'Beta an — klicken zum Wechseln auf klassisch'
+          : 'Beta aus — klicken zum Aktivieren'}
+        style={{
+          all: 'unset',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: '9px 12px 9px 16px',
+          background: beta
+            ? (hover ? 'rgba(255, 255, 255, 0.85)' : 'rgba(255, 255, 255, 0.55)')
+            : (hover ? T.bg.surface2 : 'transparent'),
+          borderRadius: 12,
+          fontFamily: T.font.ui,
+          transition: 'background 160ms cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      >
+        <span style={{
+          display: 'inline-flex',
+          width: 18,
+          height: 18,
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: beta ? T.text.primary : T.text.subtle,
+          transition: 'color 140ms',
+        }}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 1.5l1.6 3.3 3.7.5-2.7 2.5.7 3.6L7 9.7 3.7 11.4l.7-3.6L1.7 5.3l3.7-.5z"
+                  stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <span style={{
+          flex: 1,
+          fontSize: 13.5,
+          fontWeight: beta ? 500 : 400,
+          color: beta ? T.text.primary : T.text.secondary,
+          letterSpacing: '-0.005em',
+        }}>
+          Beta
+        </span>
+        <BetaTumbler on={beta} onToggle={toggleBeta} />
+      </button>
+    </div>
+  );
+}
+
+function BetaTumbler({ on, onToggle, compact = false }: { on: boolean; onToggle: () => void; compact?: boolean }) {
+  const width = compact ? 30 : 34;
+  const height = compact ? 18 : 20;
+  const knob = height - 4;
+  return (
+    <span
+      role="switch"
+      aria-checked={on}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
       style={{
-        display: 'flex',
+        position: 'relative',
+        display: 'inline-flex',
         alignItems: 'center',
-        gap: 8,
-        width: 'calc(100% - 24px)',
-        margin: '0 12px 12px',
-        padding: '6px 8px',
-        background: 'transparent',
-        border: 0,
-        borderRadius: 6,
+        width,
+        height,
+        borderRadius: 999,
+        background: on ? 'var(--accent)' : 'rgba(15, 23, 42, 0.16)',
         cursor: 'pointer',
-        color: T.text.faint,
-        fontFamily: T.font.ui,
-        fontSize: 11,
-        transition: 'all 140ms',
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = T.bg.surface2;
-        e.currentTarget.style.color = T.text.subtle;
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = 'transparent';
-        e.currentTarget.style.color = T.text.faint;
+        flexShrink: 0,
+        transition: 'background 220ms cubic-bezier(0.16, 1, 0.3, 1)',
       }}
     >
-      <span style={{ display: 'inline-flex' }}><IconCommand /></span>
-      <span style={{ flex: 1, textAlign: 'left' }}>Befehlspalette</span>
       <span style={{
-        padding: '0 4px',
-        fontSize: 9.5,
-        fontWeight: 600,
-        fontFamily: T.font.mono,
-        color: T.text.faint,
-        background: T.bg.surface2,
-        border: `1px solid ${T.border.primary}`,
-        borderRadius: 3,
-        letterSpacing: '0.04em',
-      }}>
-        {isMac ? '⌘K' : 'Ctrl K'}
-      </span>
-    </button>
+        position: 'absolute',
+        top: 2,
+        left: on ? width - knob - 2 : 2,
+        width: knob,
+        height: knob,
+        borderRadius: '50%',
+        background: '#FFFFFF',
+        boxShadow: '0 1px 2.5px rgba(0, 0, 0, 0.20)',
+        transition: 'left 220ms cubic-bezier(0.16, 1, 0.3, 1)',
+      }} />
+    </span>
   );
 }
 
@@ -1018,7 +1009,7 @@ function TodayPulse({ history }) {
   return (
     <div style={{
       padding: '10px 14px 8px',
-      borderTop: `1px solid ${T.border.primary}`,
+      borderTop: `1px solid ${T.border.subtle}`,
       display: 'flex',
       alignItems: 'center',
       gap: 10,
@@ -1104,21 +1095,6 @@ function buildDailyCounts(history, n) {
   return buckets;
 }
 
-function computeLiveShiftSec(shift) {
-  if (!shift?.startedAt) return null;
-  const startMs = new Date(shift.startedAt).getTime();
-  if (Number.isNaN(startMs)) return null;
-  return Math.max(0, Math.floor((Date.now() - startMs) / 1000));
-}
-
-function formatHMS(sec) {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
 /* ════════════════════════════════════════════════════════════════════════
    ICONS — uniform set: viewBox 16, stroke 1.3, no fill, currentColor.
    Each glyph is reduced to its essential shape — abstract more than
@@ -1199,10 +1175,3 @@ function IconAdmin() {
   );
 }
 
-function IconCommand() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path d="M4.5 2.5a1.5 1.5 0 1 0 0 3h5a1.5 1.5 0 1 0 0-3v9a1.5 1.5 0 1 0 0-3h-5a1.5 1.5 0 1 0 0 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-    </svg>
-  );
-}
