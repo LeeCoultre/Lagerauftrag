@@ -65,6 +65,7 @@ export const FIELD_PATTERNS = {
   sku:    /^[A-Z0-9]{2,4}-[A-Z0-9]{4,6}-[A-Z0-9]{4,6}$/i,
   ean13:  /^\d{13}$/,
   ean8:   /^\d{8}$/,
+  upc:    /^\d{12}$/,
 };
 
 export function isValidEAN13(s: string): boolean {
@@ -76,6 +77,28 @@ export function isValidEAN13(s: string): boolean {
   for (let i = 0; i < 12; i++) sum += digits[i] * (i % 2 === 0 ? 1 : 3);
   const check = (10 - (sum % 10)) % 10;
   return check === digits[12];
+}
+
+export function isValidEAN8(s: string): boolean {
+  if (!FIELD_PATTERNS.ean8.test(s)) return false;
+  const digits = s.split('').map((c) => parseInt(c, 10));
+  /* EAN-8 weighting is OPPOSITE of EAN-13: odd-index digits ×3, even ×1.
+     Sum first 7, mod 10, complement → 8th digit. */
+  let sum = 0;
+  for (let i = 0; i < 7; i++) sum += digits[i] * (i % 2 === 0 ? 3 : 1);
+  const check = (10 - (sum % 10)) % 10;
+  return check === digits[7];
+}
+
+export function isValidUPC(s: string): boolean {
+  if (!FIELD_PATTERNS.upc.test(s)) return false;
+  const digits = s.split('').map((c) => parseInt(c, 10));
+  /* UPC-A: 12 digits, weighting odd ×3, even ×1 over first 11, mod 10,
+     complement = 12th digit. */
+  let sum = 0;
+  for (let i = 0; i < 11; i++) sum += digits[i] * (i % 2 === 0 ? 3 : 1);
+  const check = (10 - (sum % 10)) % 10;
+  return check === digits[11];
 }
 
 export type FieldKind =
@@ -110,7 +133,8 @@ export function classifyField(value: string): FieldKind {
               before the Auftrag can move to Focus
 */
 export type ParseWarningField =
-  | 'fnsku' | 'units' | 'useItem' | 'sku' | 'ean' | 'general';
+  | 'fnsku' | 'units' | 'useItem' | 'sku' | 'ean' | 'asin'
+  | 'dim' | 'rollen' | 'achtung' | 'general';
 export type ParseWarningSeverity = 'low' | 'medium' | 'high';
 export interface ParseWarning {
   field: ParseWarningField;
@@ -152,16 +176,27 @@ export function parseTitleMeta(title) {
   const dimStr = rawW != null ? `${rawW} × ${rawH}` : null;
   const normH = normalizeHeight(rawH);
   const dim = rawW != null ? { w: rawW, h: rawH, normH, normW: rawW } : null;
-  // Rolls-per-Einheit detection. Two patterns:
+  // Rolls-per-Einheit detection. Three patterns, tried in order:
   //   (a) Explicit count anywhere in the title: "50 Rollen" / "10 Stk" /
   //       "(50 Stück)" — the strongest signal.
-  //   (b) Leading multiplier prefix: "50 EC-Cash Thermorollen…" /
-  //       "10x Thermorollen…" — common in supplier titles where the
-  //       Einheit count is written as the very first token. Only used
-  //       when (a) does not match, so explicit "(N Rollen)" still wins.
+  //   (b) Brand-sandwiched count before product type, e.g.
+  //       "Heipa 50 EC Thermorollen" / "Brand 20 EC-Cash …". Suppliers
+  //       like Heipa write count between the brand and "EC" without a
+  //       Stk/Rollen suffix, so (a) misses it. Caps at 500 to reject
+  //       dimension fragments.
+  //   (c) Leading multiplier prefix: "50 EC-Cash Thermorollen…" /
+  //       "10x Thermorollen…" — common when the count is the very
+  //       first token.
   let rollen: number | null = null;
   const explicit = cleanTitle.match(/(\d+)\s*(?:Stck|Stk|Rollen|Rolls|Stück|Pcs|Pieces|er[\s-]+Pack)\b\.?/i);
   if (explicit) rollen = parseInt(explicit[1], 10);
+  if (rollen == null) {
+    const ec = cleanTitle.match(/\b(\d{1,3})\s+EC(?:[-\s]?Cash)?\b/i);
+    if (ec) {
+      const n = parseInt(ec[1], 10);
+      if (n > 0 && n <= 500) rollen = n;
+    }
+  }
   if (rollen == null) {
     const lead = cleanTitle.match(/^(\d+)\s*[xх×]?\s+(?=\D)/);
     if (lead) {
@@ -404,13 +439,32 @@ function parseItemColumns(rest) {
   if (eanM) ean = eanM[1].trim();
   else if (upcM) upc = upcM[1].trim();
 
-  /* ── EAN check-digit validation — typo detection (>99% catch rate). */
+  /* ── EAN check-digit validation — typo detection (>99% catch rate).
+     EAN-13 + EAN-8 share the EAN column; UPC-A lives in upc when
+     codeCol starts with "UPC:". All three use the same family of
+     weighted-mod-10 checksums (see helpers near line 70). */
   if (ean && FIELD_PATTERNS.ean13.test(ean) && !isValidEAN13(ean)) {
     parseWarnings.push({
       field: 'ean',
       severity: 'medium',
       reason: 'EAN-13 Prüfziffer stimmt nicht — Tippfehler möglich',
       original: ean,
+    });
+  }
+  if (ean && FIELD_PATTERNS.ean8.test(ean) && !isValidEAN8(ean)) {
+    parseWarnings.push({
+      field: 'ean',
+      severity: 'medium',
+      reason: 'EAN-8 Prüfziffer stimmt nicht — Tippfehler möglich',
+      original: ean,
+    });
+  }
+  if (upc && FIELD_PATTERNS.upc.test(upc) && !isValidUPC(upc)) {
+    parseWarnings.push({
+      field: 'ean',
+      severity: 'medium',
+      reason: 'UPC-A Prüfziffer stimmt nicht — Tippfehler möglich',
+      original: upc,
     });
   }
 
@@ -487,6 +541,19 @@ function parseItemColumns(rest) {
   const cls = classifyItem(title);
   const codeType = detectCodeType(fnsku);
 
+  /* Thermo items without parsed dim → heuristic volume bucket can't
+     pick the right height. Warn so worker checks if the title is just
+     missing the W×H or if this is a non-roll accessory mis-classified
+     as thermo. Limited to true Thermo families (excludes Tacho/Veit/
+     ÖKO accessories which have their own bucket models). */
+  if (cls.isThermo && dim == null) {
+    parseWarnings.push({
+      field: 'dim',
+      severity: 'medium',
+      reason: 'Thermorolle ohne erkennbare Maße im Titel — Höhen-Bucket nicht zuverlässig',
+    });
+  }
+
   return {
     sku, title, asin, fnsku, ean, upc,
     condition, prep, prepType, labeler,
@@ -541,7 +608,11 @@ function parseItemsFromBlock(block, palletId) {
         const tokens = rest.split(/[\s,;|()]+/).filter(Boolean);
         const validCodes = tokens.filter((t) => {
           const k = classifyField(t);
-          return k === 'ean' || k === 'fnsku' || k === 'asin' || k === 'sku';
+          if (k === 'ean' || k === 'fnsku' || k === 'asin' || k === 'sku') return true;
+          // Short numeric internal warehouse codes (e.g. Klebeband "41")
+          // are valid useItem references regardless of the host item's category.
+          if (k === 'integer' && t.length <= 6) return true;
+          return false;
         });
         if (validCodes.length > 1) {
           parsed.parseWarnings.push({
@@ -589,17 +660,49 @@ function parseEinzelneSkuSection(tail) {
   const items: ReturnType<typeof parseEinzelneSkuItemLine>[] = [];
   if (!tail) return items;
   const lines = tail.split('\n').map((l) => l.replace(/ /g, ' ').trim());
+  /* ACHTUNG content can contain nested parens, e.g.
+     "(10 x 80mm*63mm (5) 50M)". A plain "[^)]*" capture stops at the
+     first inner ")", losing the "(5)" count that we need. Allow ONE
+     level of nested parens via `(?:[^()]|\([^)]*\))*` so the capture
+     spans the full outer payload. */
   const achtungRe =
-    /ACHTUNG[!]?\s+Jeder\s+Karton\s+mit\s+\(\s*(\d+)\s*[×x*]\s*(\d+)\s*([^)]*)\)/i;
+    /ACHTUNG[!]?\s+Jeder\s+Karton\s+mit\s+\(\s*(\d+)\s*[×x*]\s*(\d+)\s*((?:[^()]|\([^)]*\))*)\)/i;
 
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(achtungRe);
     if (!m) continue;
 
     const X = parseInt(m[1], 10);
-    const Y = parseInt(m[2], 10);
+    let Y = parseInt(m[2], 10);
     const contentRaw = (m[3] || '').trim();
-    const contentLabel = contentRaw.replace(/^x\s*/i, '').trim() || 'Rollen';
+    let contentLabel = contentRaw.replace(/^x\s*/i, '').trim() || 'Rollen';
+    let recovered: { from: string; via: 'inner-paren' | 'explicit' | 'default-1' } | null = null;
+
+    /* Dimension-poisoned ACHTUNG, e.g. "(10 x 80mm*63mm (5) 50M)".
+       The regex greedily captures the first \d+ after × as Y, which here
+       is the carton WIDTH (80mm), not the inner-pack count. Detected by
+       contentRaw starting with mm/m/M — then scan the remainder for an
+       explicit Stk/Rollen/Pcs count or a (\d+) parenthesised count, and
+       reset contentLabel to "Rollen" as the sane thermal default.
+       The recovery path stashes `recovered` so the item carries a low
+       warning (signal G in plan) showing the worker what we substituted. */
+    if (/^(mm|m\b|M\b)/.test(contentRaw)) {
+      const explicit = contentRaw.match(/(\d+)\s*(Stck|Stk|Rollen|Rolls|Stück|Pcs|Pieces)\b/i);
+      const parenCount = contentRaw.match(/\((\d+)\)/);
+      if (explicit) {
+        Y = parseInt(explicit[1], 10);
+        contentLabel = explicit[2];
+        recovered = { from: contentRaw, via: 'explicit' };
+      } else if (parenCount) {
+        Y = parseInt(parenCount[1], 10);
+        contentLabel = 'Rollen';
+        recovered = { from: contentRaw, via: 'inner-paren' };
+      } else {
+        Y = 1;
+        contentLabel = 'Rollen';
+        recovered = { from: contentRaw, via: 'default-1' };
+      }
+    }
 
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j];
@@ -608,7 +711,7 @@ function parseEinzelneSkuSection(tail) {
       if (!next.includes('\t')) continue;
       // Strip "Einzelne SKU" prefix with any arrow-like punctuation
       const cleaned = next.replace(/^Einzelne\s+SKU\s*[^\w\s]+\s*/i, '');
-      const parsed = parseEinzelneSkuItemLine(cleaned, lines, j, { X, Y, contentLabel });
+      const parsed = parseEinzelneSkuItemLine(cleaned, lines, j, { X, Y, contentLabel, recovered });
       if (parsed) items.push(parsed);
       break;
     }
@@ -627,11 +730,77 @@ function parseEinzelneSkuItemLine(line, allLines, lineIdx, achtung) {
     if (um) { parsed.useItem = um[1].trim(); break; }
   }
 
+  /* Title-vs-ACHTUNG cross-check: the title's "(N Stk)" / "N Rollen"
+     count (parsed into item.rollen by parseTitleMeta) is usually the
+     cleanest signal — ACHTUNG lines like "(10 x 80mm*63mm (5) 50M)"
+     are easy to mis-parse. When both exist and disagree, the title
+     wins and a warning surfaces in Pruefen so the worker can verify. */
+  let itemsPerPack = achtung.Y;
+  const titleRolls = (parsed as any).rollen as number | null;
+  if (titleRolls != null && titleRolls > 0 && titleRolls !== achtung.Y) {
+    /* ≥5× divergence (signal L) gets a louder reason text so worker
+       doesn't dismiss it as off-by-one rounding. Severity stays
+       'medium' — title-wins fallback already corrected the value. */
+    const ratio = Math.max(titleRolls, achtung.Y) / Math.max(1, Math.min(titleRolls, achtung.Y));
+    const isLargeDivergence = ratio >= 5;
+    parsed.parseWarnings.push({
+      field: 'rollen',
+      severity: 'medium',
+      reason: isLargeDivergence
+        ? `Titel sagt ${titleRolls} Stk, ACHTUNG sagt ${achtung.Y} — starke Abweichung (≥5×), Titelwert übernommen, bitte verifizieren`
+        : `Titel sagt ${titleRolls} Stk pro Einheit, ACHTUNG sagt ${achtung.Y} — Titelwert übernommen`,
+      original: String(achtung.Y),
+      corrected: String(titleRolls),
+    });
+    itemsPerPack = titleRolls;
+  }
+
+  /* Signal G: ACHTUNG had dimensions instead of a count, parser
+     recovered Y from inner parens / explicit Stk token / default-1.
+     Surface that recovery so worker can sanity-check the chosen Y. */
+  if (achtung.recovered) {
+    const { from, via } = achtung.recovered;
+    const viaLabel = via === 'inner-paren' ? 'aus innerer (N) gelesen'
+                   : via === 'explicit'    ? 'aus Stk/Rollen-Token gelesen'
+                   :                         'auf 1 zurückgefallen';
+    parsed.parseWarnings.push({
+      field: 'achtung',
+      severity: 'low',
+      reason: `ACHTUNG enthielt Maßangaben statt Stückzahl — Y=${itemsPerPack} aus "${from}" rekonstruiert (${viaLabel})`,
+      original: from,
+      corrected: String(itemsPerPack),
+    });
+  }
+
+  /* Signal H: X (packs per carton) impossibly high. Real X is typically
+     1-30; >100 means the regex captured an unrelated number (e.g. a
+     dimension or year). Blocking — parser is almost certainly wrong. */
+  if (achtung.X > 100) {
+    parsed.parseWarnings.push({
+      field: 'achtung',
+      severity: 'high',
+      reason: `ACHTUNG sagt ${achtung.X} Packs pro Karton — unwahrscheinlich hoch, bitte prüfen`,
+      original: String(achtung.X),
+    });
+  }
+
+  /* Signal I: Y (items per pack) impossibly high. Real Y rarely exceeds
+     100. >1000 indicates parser captured a length-in-meters or another
+     unrelated number. Blocking. */
+  if (itemsPerPack > 1000) {
+    parsed.parseWarnings.push({
+      field: 'achtung',
+      severity: 'high',
+      reason: `ACHTUNG sagt ${itemsPerPack} Stück pro Pack — unwahrscheinlich hoch, bitte prüfen`,
+      original: String(itemsPerPack),
+    });
+  }
+
   parsed.isEinzelneSku = true;
   parsed.einzelneSku = {
     packsPerCarton: achtung.X,
-    itemsPerPack: achtung.Y,
-    effectiveRollen: achtung.X * achtung.Y,
+    itemsPerPack,
+    effectiveRollen: achtung.X * itemsPerPack,
     contentLabel: achtung.contentLabel,
     cartonsCount: Math.max(1, Math.ceil((parsed.units ?? 0) / achtung.X)),
   };
@@ -924,10 +1093,21 @@ export function validateParsing(rawText, parsed) {
       }
     });
 
-    // 3. Missing FNSKU
+    // 3. Missing identifiers — escalate to `missing-identifier` when
+    //    BOTH FNSKU and SKU are absent (item literally cannot be picked).
+    //    Falls back to the original `missing-fnsku` flag when SKU is
+    //    present (worker can still scan something). Only one of the two
+    //    fires per item so Hinweise doesn't double-count.
     parsed.pallets.forEach((p) =>
       p.items.forEach((it) => {
-        if (!it.fnsku) {
+        if (!it.fnsku && !it.sku) {
+          issues.push({
+            severity: 'error',
+            kind: 'missing-identifier',
+            palletId: p.id,
+            msg: `${p.id}: Artikel ohne FNSKU und ohne SKU — nicht eindeutig identifizierbar — "${it.title?.slice(0, 40) || '—'}"`,
+          });
+        } else if (!it.fnsku) {
           issues.push({
             severity: 'error',
             kind: 'missing-fnsku',

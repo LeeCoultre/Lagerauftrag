@@ -165,33 +165,40 @@ describe('formatItemTitle', () => {
 
 /* ════════════════════════════════════════════════════════════════════ */
 describe('focusItemView — L5 size hint preserves variant distinction', () => {
-  it('appends "1 Kg" to a Füllmaterial that strips at "für"', () => {
+  /* Convention (2026-05-24): L5 size hint moved OUT of the name and INTO
+     the perCarton headline (item.rollen + item.rollenUnit). The Focus
+     hero renders it as "1 Kg" / "500 g" above a clean "Füllmaterial"
+     title — same visual distinction, less duplication, mirrors the
+     thermo "50 Rollen" split. */
+  it('surfaces "1 Kg" in perCarton (rollen + Kg unit) on a Füllmaterial', () => {
     const view = focusItemView({
       title:
         'Füllmaterial für Pakete - 1 Kg Holzwolle für Geschenkkorb - naturbelassenes Ostergras - Deko Stroh - perfekt als Füllung für Verpackungen - Premium Qualität (1 Kg Holzwolle)',
       units: 50,
     });
     expect(view.name).toMatch(/Füllmaterial/);
-    expect(view.name).toMatch(/1\s*Kg/);
+    expect(String(view.rollen)).toBe('1');
+    expect(view.rollenUnit).toBe('Kg');
   });
 
-  it('appends "500 g" for the small variant — distinguishes from 1 Kg sibling', () => {
+  it('surfaces "500 g" in perCarton for the small variant', () => {
     const view = focusItemView({
       title:
         'Füllmaterial für Pakete - 500 g Holzwolle für Geschenkkorb - naturbelassenes Ostergras - Deko Stroh - perfekt als Füllung für Verpackungen - Premium Qualität (500 g Holzwolle)',
       units: 40,
     });
-    expect(view.name).toMatch(/500\s*g/);
+    expect(String(view.rollen)).toBe('500');
+    expect(view.rollenUnit).toBe('g');
   });
 
-  it('does NOT duplicate the size hint when it survives the strip', () => {
+  it('strips the size hint from the name to avoid duplication with perCarton', () => {
     const view = focusItemView({
       title: 'Sandsack 50 Kg',
       units: 20,
     });
-    // "50 Kg" already in the stripped name → must not append again.
-    const matches = view.name.match(/50\s*Kg/gi) || [];
-    expect(matches.length).toBe(1);
+    // Name should be just "Sandsack" — size lives in perCarton now.
+    expect(view.name).not.toMatch(/50\s*Kg/i);
+    expect(view.name).toMatch(/Sandsack/);
   });
 
   it('Big Bag: strips "1000 Kg" suffix from the headline', () => {

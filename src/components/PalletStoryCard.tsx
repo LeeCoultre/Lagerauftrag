@@ -19,7 +19,7 @@
 
 import { useRef, useState } from 'react';
 import {
-  formatItemTitle, getDisplayLevel, LEVEL_META, eskuOverrideKey,
+  formatItemTitle, getDisplayLevel, LEVEL_META, eskuOverrideKey, largeBaseRank, sortItemsForPallet,
 } from '@/utils/auftragHelpers.js';
 import PalletStackViz from './PalletStackViz.jsx';
 import EskuMovePopover from './EskuMovePopover.jsx';
@@ -39,9 +39,20 @@ export default function PalletStoryCard({
 
   const accentMeta = LEVEL_META[pallet.level] || LEVEL_META[1];
 
+  /* Mirror Focus item ordering:
+     • Large-base ESKU (80×80 → rank 2, 58×64 / 57×63 → rank 1) lays the
+       physical base BEFORE Mixed.
+     • Non-base ESKU (rank 0) gets merged with Mixed and re-sorted by
+       level via sortItemsForPallet — so an L1 ESKU 80×63 lands in the
+       L1 group with Mixed L1, not dumped after L5+. */
+  const base80    = eskuAssigned.filter((it) => largeBaseRank(it) === 2);
+  const baseOther = eskuAssigned.filter((it) => largeBaseRank(it) === 1);
+  const restEsku  = eskuAssigned.filter((it) => largeBaseRank(it) === 0);
+  const combined  = sortItemsForPallet([...items, ...restEsku]);
   const ranked = [
-    ...items.map((it) => ({ source: 'mixed', item: it })),
-    ...eskuAssigned.map((it) => ({ source: 'esku', item: it })),
+    ...base80.map((it) => ({ source: 'esku', item: it })),
+    ...baseOther.map((it) => ({ source: 'esku', item: it })),
+    ...combined.map((it) => ({ source: it.isEinzelneSku ? 'esku' : 'mixed', item: it })),
   ];
   const visibleItems = showAllItems ? ranked : ranked.slice(0, TOP_ITEMS_VISIBLE);
   const hiddenCount = ranked.length - visibleItems.length;

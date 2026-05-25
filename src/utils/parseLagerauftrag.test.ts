@@ -13,6 +13,9 @@ import {
   detectFormat,
   normalizeHeight,
   detectCodeType,
+  isValidEAN8,
+  isValidUPC,
+  parseLagerauftragText,
 } from './parseLagerauftrag.js';
 
 describe('parseTitleMeta', () => {
@@ -198,5 +201,122 @@ describe('validateParsing', () => {
     if (asinFlag) {                          // only emitted when ASIN actually missing
       expect(asinFlag.severity).toBe('warn');
     }
+  });
+
+  it('flags missing-identifier (error) when BOTH fnsku and sku absent', () => {
+    const parsed = minimalParsed({
+      meta: { totalUnits: 5, totalSkus: 0 },
+      pallets: [{
+        id: 'P1-B1',
+        items: [{ title: 'Mystery Item', units: 5, fnsku: '', sku: '' }],
+      }],
+    });
+    const v = validateParsing('any', parsed);
+    const missingId = v.issues.find((i) => i.kind === 'missing-identifier');
+    expect(missingId).toBeDefined();
+    expect(missingId?.severity).toBe('error');
+    // Should NOT also emit missing-fnsku (avoid double-count)
+    expect(v.issues.find((i) => i.kind === 'missing-fnsku')).toBeUndefined();
+  });
+
+  it('falls back to missing-fnsku when sku present but fnsku absent', () => {
+    const parsed = minimalParsed({
+      meta: { totalUnits: 5, totalSkus: 1 },
+      pallets: [{
+        id: 'P1-B1',
+        items: [{ title: 'Item', units: 5, fnsku: '', sku: 'AB-CDEF-1234' }],
+      }],
+    });
+    const v = validateParsing('any', parsed);
+    expect(v.issues.find((i) => i.kind === 'missing-identifier')).toBeUndefined();
+    expect(v.issues.find((i) => i.kind === 'missing-fnsku')).toBeDefined();
+  });
+});
+
+describe('Checksum helpers', () => {
+  it('isValidEAN8 accepts known-good and rejects off-by-one corruption', () => {
+    // 40123455 — checksum 5 (computed from "4012345" weights)
+    expect(isValidEAN8('40123455')).toBe(true);
+    // Flip last digit → invalid
+    expect(isValidEAN8('40123450')).toBe(false);
+    // Non-8-digit input
+    expect(isValidEAN8('1234567')).toBe(false);
+    expect(isValidEAN8('123456789')).toBe(false);
+  });
+
+  it('isValidUPC accepts known-good and rejects corruption', () => {
+    // 042100005264 — Coca-Cola classic UPC, well-known valid checksum
+    expect(isValidUPC('042100005264')).toBe(true);
+    // Flip last digit → invalid
+    expect(isValidUPC('042100005263')).toBe(false);
+    // Wrong length
+    expect(isValidUPC('04210000526')).toBe(false);
+  });
+});
+
+describe('parseWarnings — new uncertainty signals', () => {
+  /* Build a minimal standard-format Auftrag text. The first item on
+     P1-B1 is a placeholder that satisfies parseItemsFromBlock; the
+     ESKU block at the tail drives parseEinzelneSkuSection. */
+  const buildAuftrag = (eskuBlock: string) => [
+    'PALETTE 1 - P1-B1',
+    'P1-B1 → AB-CDEF-1234\tDummy item\tB07AAAAAAA\tX001AAAAAA\tEAN:9120107187433\tNeu\tKeine Vorbereitung erforderlich\tnull\tVerkäufer\t1',
+    '',
+    eskuBlock,
+  ].join('\n');
+
+  const findEskuWarning = (parsed: any, field: string) => {
+    const item = parsed.einzelneSkuItems?.[0];
+    if (!item) return undefined;
+    return (item.parseWarnings || []).find((w: any) => w.field === field);
+  };
+
+  it('Thermo title without parsed dim → medium dim warning', () => {
+    const text = [
+      'PALETTE 1 - P1-B1',
+      'P1-B1 → AB-CDEF-1234\tBonrollen Thermopapier ohne Maße\tB07AAAAAAA\tX001AAAAAA\tEAN:9120107187433\tNeu\tKeine Vorbereitung erforderlich\tnull\tVerkäufer\t10',
+    ].join('\n');
+    const parsed = parseLagerauftragText(text);
+    const item = parsed.pallets[0]?.items[0];
+    expect(item).toBeDefined();
+    const dimFlag = (item.parseWarnings || []).find((w: any) => w.field === 'dim');
+    expect(dimFlag).toBeDefined();
+    expect(dimFlag?.severity).toBe('medium');
+  });
+
+  it('ACHTUNG X > 100 → high achtung warning', () => {
+    const esku = [
+      'ACHTUNG! Jeder Karton mit (200 x 5 Rollen) muss ein Etikett haben.',
+      'Einzelne SKU → SK-WXYZ-5678\tThermo item\tB07BBBBBBB\tX001BBBBBB\tEAN:9120107187433\tNeu\tKeine Vorbereitung erforderlich\tnull\tVerkäufer\t10',
+    ].join('\n');
+    const parsed = parseLagerauftragText(buildAuftrag(esku));
+    const flag = findEskuWarning(parsed, 'achtung');
+    expect(flag).toBeDefined();
+    expect(flag?.severity).toBe('high');
+    expect(flag?.reason).toMatch(/Packs pro Karton/);
+  });
+
+  it('ACHTUNG Y > 1000 → high achtung warning', () => {
+    const esku = [
+      'ACHTUNG! Jeder Karton mit (5 x 5000 Rollen) muss ein Etikett haben.',
+      'Einzelne SKU → SK-WXYZ-5678\tThermo item\tB07BBBBBBB\tX001BBBBBB\tEAN:9120107187433\tNeu\tKeine Vorbereitung erforderlich\tnull\tVerkäufer\t10',
+    ].join('\n');
+    const parsed = parseLagerauftragText(buildAuftrag(esku));
+    const achtungFlags = (parsed.einzelneSkuItems[0]?.parseWarnings || [])
+      .filter((w: any) => w.field === 'achtung' && w.severity === 'high');
+    expect(achtungFlags.length).toBeGreaterThanOrEqual(1);
+    expect(achtungFlags.some((w: any) => /Stück pro Pack/.test(w.reason))).toBe(true);
+  });
+
+  it('ACHTUNG dim-poisoned (10 x 80mm*63mm (5) 50M) → low recovered warning', () => {
+    const esku = [
+      'ACHTUNG! Jeder Karton mit (10 x 80mm*63mm (5) 50M) muss ein Etikett haben.',
+      'Einzelne SKU → SK-WXYZ-5678\tThermo item 80x63\tB07BBBBBBB\tX001BBBBBB\tEAN:9120107187433\tNeu\tKeine Vorbereitung erforderlich\tnull\tVerkäufer\t10',
+    ].join('\n');
+    const parsed = parseLagerauftragText(buildAuftrag(esku));
+    const flag = findEskuWarning(parsed, 'achtung');
+    expect(flag).toBeDefined();
+    expect(flag?.severity).toBe('low');
+    expect(flag?.reason).toMatch(/rekonstruiert/);
   });
 });

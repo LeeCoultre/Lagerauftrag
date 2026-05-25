@@ -193,7 +193,11 @@ export function sortPallets(pallets) {
 
 const PALLET_VOL_M3   = 1.59;                 // SOP soft limit
 export const PALLET_VOL_CM3  = PALLET_VOL_M3 * 1e6;
-const PALLET_WEIGHT_KG = 700;                  // SOP soft limit
+const PALLET_WEIGHT_KG = 700;                  // SOP soft limit (display %)
+// OVERLOAD-W only triggers ABOVE this threshold — gives a 5 kg
+// tolerance over the nominal 700 kg limit so a 703 kg pallet (well
+// within scale precision) doesn't surface a bogus flag in Pruefen.
+const PALLET_WEIGHT_OVERLOAD_KG = PALLET_WEIGHT_KG + 5;
 const TARA_KG         = 0.4;                   // Karton tara (corrugated + tape)
 const PACK_COEFF      = 1.125;                 // Packing slack inside the carton
 const SWEET_SPOT_PCT  = 0.85;                  // Sweet-spot fill target
@@ -258,6 +262,33 @@ function eskuCartonHeuristicCm3(it) {
   if (lvl === 5) return 1800 * N;             // Produktion
   if (lvl === 4) return 350  * N;             // Klebeband
   return 800 * N;
+}
+
+/* Title-pattern dimension overrides — per-Einheit L×B×H (cm) + weight
+   (kg) for SKUs the warehouse uses regularly but that are missing from
+   the sku_dimensions table. Takes precedence over the per-level
+   heuristic when DB lookup returns nothing AND the title matches.
+   Add new entries as workers report missing rows. */
+const TITLE_DIM_OVERRIDES = [
+  { pattern: /silosäcke?\s*10\b/i,      lengthCm: 34, widthCm: 25, heightCm: 12, weightKg: 1.12 },
+  { pattern: /silosäcke?\s*20\b/i,      lengthCm: 34, widthCm: 25, heightCm: 12, weightKg: 1.12 },
+  { pattern: /\b100\s*x\s*sandsäcke?\b/i,                                 lengthCm: 24,   widthCm: 35,   heightCm: 36, weightKg: 3.76 },
+  // "TK THERMALKING <N>X Sandsäcke - ... Silosandsäcke ..." family —
+  // "NX" prefix qualifies the pack size, "Silosandsäcke" appears later
+  // in the description. Lookahead requires both tokens in the same title
+  // so generic Sandsäcke don't collide with these dim overrides.
+  { pattern: /(?=.*silosandsäcke)\b50\s*x\s*sandsäcke?\b/i,               lengthCm: 32.5, widthCm: 24.5, heightCm: 17, weightKg: 1.98 },
+  { pattern: /(?=.*silosandsäcke)\b20\s*x\s*sandsäcke?\b/i,               lengthCm: 24,   widthCm: 19.5, heightCm: 15, weightKg: 0.9  },
+];
+
+function dimsFromTitle(title) {
+  if (!title) return null;
+  for (const o of TITLE_DIM_OVERRIDES) {
+    if (o.pattern.test(title)) {
+      return { lengthCm: o.lengthCm, widthCm: o.widthCm, heightCm: o.heightCm, weightKg: o.weightKg };
+    }
+  }
+  return null;
 }
 
 /* Sniff "500 g" / "1 Kg" / "1.5 kg" hints from item title and convert
@@ -392,6 +423,17 @@ function mixedItemHeuristicKg(it) {
   return 0.10;
 }
 
+/* Whether the ESKU item is a Kürbiskernöl bottle pack (1 L or 0.5 L).
+   Admin uploads those rows as PER-CARTON dims (the X cartons × Y
+   bottles the warehouse physically handles), so the carton-ratio
+   multiplier must be 1, not packsPerCarton. Detected via title — the
+   only physical class where this convention currently applies. */
+function isKernolBottlePack(it) {
+  const t = (it?.title || '').toLowerCase();
+  if (!/(kürbis|kernöl)/.test(t)) return false;
+  return /\(\s*(1|0[.,]5)\s*l\s*\)/.test(t) || /\b(1|0[.,]5)\s*l\b/.test(t);
+}
+
 /* How many "parent Einheiten" of physical content live in ONE ESKU
    carton — used to scale weight/volume.
 
@@ -407,10 +449,17 @@ function mixedItemHeuristicKg(it) {
    Rollen)" — same 50 rolls, just split into smaller packs. So 1
    ESKU carton ≈ 1 parent Einheit physically, multiplier 1.
 
+   Exception (2026-05-24): Kürbiskernöl 1L / 0.5L bottle packs have
+   dim rows uploaded as per-CARTON (already includes the 6 bottles in
+   the box), so ratio must be 1 regardless of dimensionsMatch source.
+   Without this, FNSKU-keyed Kernöl rows got × packsPerCarton on top
+   of the carton dim and triggered bogus OVERLOAD-W/V.
+
    Without dim, we rely on heuristics elsewhere. */
 function eskuCartonRatio(it) {
   if (!it.dimensions) return it.einzelneSku?.packsPerCarton ?? 1;
   if (it.dimensionsMatch === 'use_item') return 1;
+  if (isKernolBottlePack(it)) return 1;
   return it.einzelneSku?.packsPerCarton ?? 1;
 }
 
@@ -437,6 +486,8 @@ export function itemTotalVolumeCm3(it) {
   if (it.dimensions) {
     return u * it.dimensions.lengthCm * it.dimensions.widthCm * it.dimensions.heightCm;
   }
+  const td = dimsFromTitle(it.title);
+  if (td) return u * td.lengthCm * td.widthCm * td.heightCm;
   return u * mixedItemHeuristicCm3(it);
 }
 
@@ -457,6 +508,8 @@ export function itemTotalWeightKg(it) {
     return u * Math.max(1, it.rollen || 1) * TACHO_KG_PER_ROLL;
   }
   if (it.dimensions) return u * it.dimensions.weightKg;
+  const td = dimsFromTitle(it.title);
+  if (td) return u * td.weightKg;
   return u * mixedItemHeuristicKg(it);
 }
 
@@ -645,20 +698,39 @@ export function isLargeBaseFormat(it) {
 }
 
 /* Sub-priority inside the "large base layer" group:
-     2 = 80mm width variants (top priority — placed first)
+     2 = 80mm × 80(mm/m) — the only true square 80 base (flat, stable
+         platform for everything else). 80×63 and 80×50m are rectangular
+         and stack POORLY as a base — they're explicitly demoted to 0 so
+         they sit naturally after Mixed instead of being lifted to the
+         front. See memory `marathon_thermo_80_stacking_order`.
      1 = 57mm × 63m/mm  or  58 × 64  (placed after 80mm, before Mixed)
-     0 = not a base-layer format
+     0 = not a base-layer format (includes 80×63, 80×50m)
+
+   ESKU quantity guard: a "base layer" only makes sense when the worker
+   has enough cartons to physically form a row across the pallet. ESKU
+   with cartonsCount < BASE_LAYER_MIN_CARTONS gets demoted to rank 0
+   regardless of format, so e.g. 1 carton of 80×80 ÖKO doesn't get
+   stacked under 200+ Mixed Thermorollen as if it were a real base.
 */
+const BASE_LAYER_MIN_CARTONS = 3;
 export function largeBaseRank(it) {
   const title = it?.title || '';
   if (!title) return 0;
-  // 80mm width × anything — highest priority base layer
-  if (/\b80\s*mm\s*[x×*]/i.test(title)) return 2;
+  let rank = 0;
+  // 80×80 only (mm × mm OR mm × m). Both numbers must equal 80.
+  if (/\b80\s*mm\s*[x×*]\s*80\s*(?:mm|m)\b/i.test(title)) rank = 2;
   // 58 × 64 (Heipa square variant)
-  if (/\b58\s*[x×*]\s*64\b/i.test(title)) return 1;
+  else if (/\b58\s*[x×*]\s*64\b/i.test(title)) rank = 1;
   // 57mm × 63 (mm or m) — Thermalking tall
-  if (/\b57\s*mm\s*[x×*]\s*63\s*m/i.test(title)) return 1;
-  return 0;
+  else if (/\b57\s*mm\s*[x×*]\s*63\s*m/i.test(title)) rank = 1;
+  if (rank === 0) return 0;
+  // ESKU quantity guard — small ESKU is NOT a real base layer.
+  if (it?.isEinzelneSku === true) {
+    const cartons = it?.einzelneSku?.cartonsCount
+      ?? Math.max(1, Math.ceil((it?.units || 0) / (it?.einzelneSku?.packsPerCarton || 1)));
+    if (cartons < BASE_LAYER_MIN_CARTONS) return 0;
+  }
+  return rank;
 }
 
 export function sortItemsForPallet(items) {
@@ -1116,8 +1188,8 @@ function buildPalletState(p) {
 
   // Detect Phase-1 overloads up-front
   const overloadFlags = new Set();
-  if (weightKg > PALLET_WEIGHT_KG) overloadFlags.add('OVERLOAD-W');
-  if (volCm3   > PALLET_VOL_CM3)   overloadFlags.add('OVERLOAD-V');
+  if (weightKg > PALLET_WEIGHT_OVERLOAD_KG) overloadFlags.add('OVERLOAD-W');
+  if (volCm3   > PALLET_VOL_CM3)            overloadFlags.add('OVERLOAD-V');
 
   // Capacity-fraction overload — sum of (count/max) across formats.
   // > 1.0 means the pallet is physically over-stuffed by carton count
@@ -1147,8 +1219,8 @@ function buildPalletState(p) {
     add(e) {
       const newVol = this.volCm3 + e.volCm3;
       const newWgt = this.weightKg + e.weightKg;
-      if (newWgt > PALLET_WEIGHT_KG) this.overloadFlags.add('OVERLOAD-W');
-      if (newVol > PALLET_VOL_CM3)   this.overloadFlags.add('OVERLOAD-V');
+      if (newWgt > PALLET_WEIGHT_OVERLOAD_KG) this.overloadFlags.add('OVERLOAD-W');
+      if (newVol > PALLET_VOL_CM3)            this.overloadFlags.add('OVERLOAD-V');
       this.volCm3 = newVol;
       this.weightKg = newWgt;
       this.formats.add(e.formatSig);
@@ -1327,8 +1399,8 @@ function scorePallet(carton, ps) {
   // it over — otherwise subsequent cartons of the same group keep piling
   // onto the already-overloaded pallet without scoring impact.
   if (!carton.palletLoadMax) {
-    if ((ps.weightKg + carton.weightKg) > PALLET_WEIGHT_KG) pen += 50000;
-    if ((ps.volCm3   + carton.volCm3)   > PALLET_VOL_CM3)   pen += 50000;
+    if ((ps.weightKg + carton.weightKg) > PALLET_WEIGHT_OVERLOAD_KG) pen += 50000;
+    if ((ps.volCm3   + carton.volCm3)   > PALLET_VOL_CM3)            pen += 50000;
   }
 
   if (pen > 0) {
@@ -1423,8 +1495,8 @@ function predictOverloadGroup(carton, ps, totalCartons) {
   const flags: string[] = [];
   const w = ps.weightKg + carton.weightKg * totalCartons;
   const v = ps.volCm3   + carton.volCm3   * totalCartons;
-  if (w > PALLET_WEIGHT_KG) flags.push('OVERLOAD-W');
-  if (v > PALLET_VOL_CM3)   flags.push('OVERLOAD-V');
+  if (w > PALLET_WEIGHT_OVERLOAD_KG) flags.push('OVERLOAD-W');
+  if (v > PALLET_VOL_CM3)            flags.push('OVERLOAD-V');
   if (carton.formatKey && carton.palletLoadMax) {
     const wouldFrac = ps.capacityFraction() + (totalCartons / carton.palletLoadMax);
     if (wouldFrac > 1.0) flags.push('OVERLOAD-CAP');
@@ -1443,7 +1515,7 @@ function pickPallet(carton, states) {
     // this filter the scoring fight (brand-match vs sweet-spot) could
     // still send cartons onto an already-overloaded pallet.
     const wouldNotOverflow = eligible.filter((ps) =>
-      (ps.weightKg + carton.weightKg) <= PALLET_WEIGHT_KG &&
+      (ps.weightKg + carton.weightKg) <= PALLET_WEIGHT_OVERLOAD_KG &&
       (ps.volCm3   + carton.volCm3)   <= PALLET_VOL_CM3
     );
     const candidates = wouldNotOverflow.length > 0 ? wouldNotOverflow : eligible;
@@ -1502,7 +1574,7 @@ function pickPallet(carton, states) {
 
 function predictOverload(carton, ps) {
   const flags: string[] = [];
-  if (ps.weightKg + carton.weightKg > PALLET_WEIGHT_KG) flags.push('OVERLOAD-W');
+  if (ps.weightKg + carton.weightKg > PALLET_WEIGHT_OVERLOAD_KG) flags.push('OVERLOAD-W');
   if (ps.volCm3 + carton.volCm3 > PALLET_VOL_CM3) flags.push('OVERLOAD-V');
   // Capacity fraction — empirical max cartons of THIS format on THIS
   // pallet (factoring stack height + footprint voids). Only flagged
@@ -1671,6 +1743,21 @@ export function estimateOrderSeconds(pallets) {
   return s;
 }
 
+/* Clean ESKU contentLabel for Focus display. The raw label can be
+   verbose ("Stück Kürbiskernöl 1 L") because the ACHTUNG regex
+   captures everything between "(N × M …)" parens. Rules:
+     • Kürbiskernöl/Kernöl → "Dose" (warehouse convention)
+     • Otherwise take just the first non-numeric word (the unit noun)
+     • Fall back to "Einheiten" when nothing recognisable. */
+function cleanContentLabel(rawLabel, title) {
+  const t = String(title || '').toLowerCase();
+  if (/(kürbis|kernöl)/.test(t)) return 'Dose';
+  const raw = String(rawLabel || '').trim();
+  if (!raw) return 'Einheiten';
+  const firstWord = raw.split(/[\s,;|()]+/).find((w) => w && !/^\d+([.,]\d+)?$/.test(w));
+  return firstWord || 'Einheiten';
+}
+
 /* ─── Build view-shape for Focus ──────────────────────────────────────── */
 export function focusItemView(item) {
   const { rollen } = parseTitleMeta(item.title || '');
@@ -1690,13 +1777,28 @@ export function focusItemView(item) {
     (lstFullPos.test(t) || sepaDruck.test(t)) ? 'mit LST' :
     null;
 
-  // Produktion-Fallback: "(50)" trailing oder "50x ..." leading
+  // Produktion-Fallback: "(50)" trailing oder "50x ..." leading.
+  // Then for L5 items without a piece count (Füllmaterial / Säcke /
+  // similar weight-based products), fall back to the title's weight or
+  // volume hint (1 Kg / 500 g / 250 ml / 1 L) so the headline mirrors
+  // the thermo "50 Rollen" split — content amount on its own line,
+  // product name clean of size noise.
   let perCarton = item.rollen || rollen || null;
+  let perCartonUnit = 'Rollen';
   const lvl = getDisplayLevel(item);
   if (!perCarton && lvl === 5) {
-    perCarton = extractProduktionPerCarton(item.title || '');
+    const cnt = extractProduktionPerCarton(item.title || '');
+    if (cnt != null) {
+      perCarton = cnt;
+      perCartonUnit = 'Stück';
+    } else {
+      const sz = extractL5SizeParts(item.title || '');
+      if (sz) {
+        perCarton = sz.value;
+        perCartonUnit = sz.unit;
+      }
+    }
   }
-  const perCartonUnit = lvl === 5 ? 'Stück' : 'Rollen';
 
   // ESKU items carry their own carton metadata (cartonsCount =
   // number of FBA-labelled cartons) plus distributor-attached
@@ -1708,6 +1810,19 @@ export function focusItemView(item) {
     ? (item.einzelneSku?.cartonsCount ?? Math.max(1, Math.ceil((item.units || 0) / (item.einzelneSku?.packsPerCarton || 1))))
     : null;
   const eskuPacksPerCarton = isEsku ? (item.einzelneSku?.packsPerCarton ?? null) : null;
+  /* Inner-pack content for the "Y label × N" Focus headline.
+     - value = itemsPerPack (Y from ACHTUNG, "things per inner pack")
+     - label = cleaned contentLabel (first word, with product-specific
+       override e.g. Kürbiskernöl → "Dose")
+     - multiplier = item.units (TOTAL Einheiten across all FBA cartons,
+       not just one carton — the worker reads it as "this many to scan").
+     Worker math: total = value × multiplier (e.g. "5 Rollen × 50" = 250
+     rolls, "1 Dose × 42" = 42 Dose). Anything else mixes per-Karton and
+     per-order numbers and confuses the warehouse. */
+  const eskuItemsPerPack = isEsku ? (item.einzelneSku?.itemsPerPack ?? null) : null;
+  const eskuContentLabel = isEsku
+    ? cleanContentLabel(item.einzelneSku?.contentLabel, item.title)
+    : null;
   const placementFlags = item.placementMeta?.flags || [];
 
   // Display keeps the original useItem text (incl. wrappers like
@@ -1750,6 +1865,8 @@ export function focusItemView(item) {
     isEsku,
     eskuCartons,
     eskuPacksPerCarton,
+    eskuItemsPerPack,
+    eskuContentLabel,
     placementFlags,
   };
 }
@@ -1770,13 +1887,20 @@ export function extractProduktionPerCarton(title) {
    yield "500 g" rather than colliding with later occurrences. Returns
    null if no size token is present. */
 function extractL5SizeHint(title) {
+  const parts = extractL5SizeParts(title);
+  return parts ? `${parts.value} ${parts.unit}` : null;
+}
+
+/* Same hint split into value + unit so Focus can render it like a
+   per-Einheit fact ("1 Kg" headline + "Füllmaterial" title) instead of
+   collapsing both into a single noisy name line. */
+export function extractL5SizeParts(title) {
   if (!title) return null;
-  const m = title.match(/\b(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml)\b/i);
+  const m = String(title).match(/\b(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml)\b/i);
   if (!m) return null;
-  const num = m[1];
   const unit = m[2].toLowerCase();
   const pretty = unit === 'kg' ? 'Kg' : unit === 'l' ? 'L' : unit;
-  return `${num} ${pretty}`;
+  return { value: m[1], unit: pretty };
 }
 
 function shortArticleName(item) {
@@ -1830,15 +1954,12 @@ function shortArticleName(item) {
       .split(/[,(–—-]/)[0]
       .trim();
     if (!s) s = title.split(/[,(]/)[0].trim();
-    // Surface the size hint (e.g. "500 g", "1 Kg", "1 L") so visually
-    // identical L5 names like "Füllmaterial" are still distinguishable
-    // between pack sizes. Read from the original title because the strip
-    // above usually drops the "für …" tail that carries the gram count.
-    const size = extractL5SizeHint(title);
+    // Drop weight/volume tokens from the name — focusItemView now lifts
+    // them into the perCarton headline ("1 Kg" above "Füllmaterial"),
+    // mirroring the thermo "50 Rollen" split. Keeping them inline would
+    // duplicate the figure across both lines.
+    s = s.replace(/\s*\b\d+(?:[.,]\d+)?\s*(?:kg|g|l|ml)\b/gi, '').replace(/\s{2,}/g, ' ').trim();
     if (s.length > 50) s = s.slice(0, 47) + '…';
-    if (size && !new RegExp(`\\b${size.replace(/\s+/g, '\\s+')}\\b`, 'i').test(s)) {
-      s = `${s} ${size}`;
-    }
     return s;
   }
 

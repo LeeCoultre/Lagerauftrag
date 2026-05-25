@@ -30,7 +30,7 @@ import {
   enrichItemDims,
   levelDistribution, sortItemsForPallet, LEVEL_META,
   itemTotalWeightKg,
-  formatItemTitle, getDisplayLevel,
+  formatItemTitle, getDisplayLevel, largeBaseRank,
 } from '@/utils/auftragHelpers.js';
 import { lookupSkuDimensions } from '@/marathonApi.js';
 import {
@@ -40,6 +40,7 @@ import PreflightCard from '@/components/PreflightCard.jsx';
 import PalletStoryCard from '@/components/PalletStoryCard.jsx';
 import PalletMiniCard from '@/components/PalletMiniCard.jsx';
 import PalletStackViz from '@/components/PalletStackViz.jsx';
+import CancelAuftragModal from '@/components/CancelAuftragModal';
 import { analyzeAuftrag } from '@/utils/preflightAnalyzer.js';
 import { buildPalletStory, rankPallets } from '@/utils/palletStory.js';
 
@@ -2057,7 +2058,8 @@ function formatDur(sec) {
    and Focus-gate logic is preserved.
    ════════════════════════════════════════════════════════════════════════ */
 function BetaPruefen() {
-  const { current, goToStep, moveEskuToPallet } = useAppState();
+  const { current, goToStep, moveEskuToPallet, cancelCurrent, abortCurrent } = useAppState();
+  const [stornoOpen, setStornoOpen] = useState(false);
   const rawPallets = current?.parsed?.pallets || [];
   const eskuItems  = current?.parsed?.einzelneSkuItems || [];
   const eskuOverrides = current?.eskuOverrides || {};
@@ -2277,7 +2279,7 @@ function BetaPruefen() {
     });
 
     parseWarnings.forEach((w) => {
-      const reasons = (w.warnings || []).map((wi: any) => wi.msg || wi.message || String(wi.code || 'Unklar'));
+      const reasons = (w.warnings || []).map((wi: any) => wi.reason || wi.msg || wi.message || String(wi.code || 'Unklar'));
       const position = w.palletId === 'ESKU' ? `ESKU · #${w.itemIdx + 1}` : `${w.palletId} · #${w.itemIdx + 1}`;
       const title = w.item?.useItem || w.item?.title || w.item?.fnsku || 'Artikel';
       rows.push({
@@ -2340,7 +2342,72 @@ function BetaPruefen() {
         fontFamily: T.font.ui,
       }}>
 
-        {/* ── IDENTITY ────────────────────────────────────────────── */}
+        {/* ── EXIT ACTIONS ────────────────────────────────────────── */}
+        <div style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          <button
+            type="button"
+            onClick={cancelCurrent}
+            title="Auftrag verlassen, zurück in die Warteschlange"
+            style={{
+              all: 'unset',
+              cursor: 'pointer',
+              fontFamily: T.font.ui,
+              fontSize: 12,
+              fontWeight: 600,
+              color: T.text.subtle,
+              padding: '6px 14px',
+              borderRadius: 999,
+              background: '#F4F5F7',
+              border: '1px solid transparent',
+              letterSpacing: '0.02em',
+              transition: 'background 160ms ease, color 160ms ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = '#FFFFFF';
+              e.currentTarget.style.color = T.text.primary;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = '#F4F5F7';
+              e.currentTarget.style.color = T.text.subtle;
+            }}
+          >
+            Verlassen
+          </button>
+          <button
+            type="button"
+            onClick={() => setStornoOpen(true)}
+            title="Auftrag stornieren — geht mit Begründung in die Historie"
+            style={{
+              all: 'unset',
+              cursor: 'pointer',
+              fontFamily: T.font.ui,
+              fontSize: 12,
+              fontWeight: 600,
+              color: T.status.danger.text,
+              padding: '6px 14px',
+              borderRadius: 999,
+              background: T.status.danger.bg,
+              border: `1px solid ${T.status.danger.border}`,
+              letterSpacing: '0.02em',
+              transition: 'background 160ms ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = T.status.danger.border;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = T.status.danger.bg;
+            }}
+          >
+            Stornieren
+          </button>
+        </div>
+
+        {/* ── IDENTITY + PREFLIGHT — combined paper-island ───────── */}
         <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) backwards' }}>
           <BetaPaperCard>
             <BetaWhitePanel padding="28px 32px">
@@ -2393,21 +2460,22 @@ function BetaPruefen() {
                 <BetaMetricsLine stats={stats} />
               </div>
             </BetaWhitePanel>
+
+            {/* Preflight nested as a second white panel inside the same
+                paper-island, so worker sees FBA-Identity and Hinweise as
+                one structural block. */}
+            {hasHinweise && (
+              <BetaHinweiseCard
+                naked
+                hinweise={hinweise}
+                acked={acked}
+                onAckOne={ackOne}
+                onAckAll={ackAll}
+                onJumpToPallet={handleJumpToPallet}
+              />
+            )}
           </BetaPaperCard>
         </div>
-
-        {/* ── HINWEISE (only if anything to show) ─────────────────── */}
-        {hasHinweise && (
-          <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) 80ms backwards' }}>
-            <BetaHinweiseCard
-              hinweise={hinweise}
-              acked={acked}
-              onAckOne={ackOne}
-              onAckAll={ackAll}
-              onJumpToPallet={handleJumpToPallet}
-            />
-          </div>
-        )}
 
         {/* ── PALETTEN ─────────────────────────────────────────────── */}
         <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) 140ms backwards' }}>
@@ -2473,6 +2541,7 @@ function BetaPruefen() {
                   <BetaWhitePanel key={p.id} padding="18px 22px">
                     <BetaPalletBlock
                       pallet={p}
+                      palletNumber={raw?.number}
                       items={raw?.items || []}
                       eskuAssigned={eskuAssigned}
                       palletState={palletState}
@@ -2491,6 +2560,18 @@ function BetaPruefen() {
         unackedHigh={unackedHigh}
         validErrors={validView.errors}
         onStartFocus={onStartFocus}
+      />
+
+      <CancelAuftragModal
+        open={stornoOpen}
+        fbaCode={current?.fbaCode || current?.parsed?.meta?.sendungsnummer || current?.fileName}
+        pallets={current?.parsed?.pallets || []}
+        eskuItems={current?.parsed?.einzelneSkuItems || []}
+        onClose={() => setStornoOpen(false)}
+        onConfirm={(payload) => {
+          setStornoOpen(false);
+          abortCurrent(payload);
+        }}
       />
     </Page>
   );
@@ -2679,7 +2760,7 @@ function BetaBigCopy({ value, rawValue, ariaLabel }: { value: React.ReactNode; r
   );
 }
 
-function BetaPalletBlock({ pallet, items, eskuAssigned, palletState }) {
+function BetaPalletBlock({ pallet, palletNumber, items, eskuAssigned, palletState }) {
   const lvl = pallet.level;
   const meta = lvl != null ? LEVEL_META[lvl] : null;
   const fillPct = Math.round((palletState?.fillPct ?? pallet.fillPct ?? 0) * 100);
@@ -2738,7 +2819,7 @@ function BetaPalletBlock({ pallet, items, eskuAssigned, palletState }) {
             color: T.text.primary,
             letterSpacing: '-0.01em',
           }}>
-            {shortPalletId(pallet)}
+            {typeof palletNumber === 'number' ? `P${palletNumber}` : (pallet.id || '')}
           </span>
           {meta && (
             <span style={{
@@ -2780,22 +2861,38 @@ function BetaPalletBlock({ pallet, items, eskuAssigned, palletState }) {
           </span>
         </div>
 
-        {/* Article list */}
-        <ul style={{
-          listStyle: 'none',
-          margin: 0,
-          padding: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 6,
-        }}>
-          {(items || []).map((it, j) => (
-            <BetaArticleRow key={`m-${j}`} item={it} pos={j + 1} />
-          ))}
-          {(eskuAssigned || []).map((it, j) => (
-            <BetaArticleRow key={`e-${j}`} item={it} pos={(items?.length || 0) + j + 1} isEsku />
-          ))}
-        </ul>
+        {/* Article list — mirrors Focus item ordering:
+            • Large-base ESKU (80×80 → rank 2, 58×64 / 57×63 → rank 1)
+              goes BEFORE Mixed so worker lays it as the pallet base.
+            • Non-base ESKU (rank 0) gets MERGED with Mixed and re-sorted
+              by level via sortItemsForPallet — so an L1 ESKU (e.g. 80×63
+              Thermo) lands in the L1 group together with L1 Mixed
+              instead of being dumped after L5 Produktion. */}
+        {(() => {
+          const base80    = (eskuAssigned || []).filter((it) => largeBaseRank(it) === 2);
+          const baseOther = (eskuAssigned || []).filter((it) => largeBaseRank(it) === 1);
+          const restEsku  = (eskuAssigned || []).filter((it) => largeBaseRank(it) === 0);
+          const combined = sortItemsForPallet([...(items || []), ...restEsku]);
+          const ordered = [
+            ...base80.map((it) => ({ it, isEsku: true })),
+            ...baseOther.map((it) => ({ it, isEsku: true })),
+            ...combined.map((it) => ({ it, isEsku: it.isEinzelneSku === true })),
+          ];
+          return (
+            <ul style={{
+              listStyle: 'none',
+              margin: 0,
+              padding: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            }}>
+              {ordered.map(({ it, isEsku }, j) => (
+                <BetaArticleRow key={`${isEsku ? 'e' : 'm'}-${j}`} item={it} pos={j + 1} isEsku={isEsku} />
+              ))}
+            </ul>
+          );
+        })()}
       </div>
     </section>
   );
@@ -2805,21 +2902,36 @@ function BetaArticleRow({ item, pos, isEsku = false }) {
   const lvl = getDisplayLevel(item) || item.level || 1;
   const meta = LEVEL_META[lvl] || LEVEL_META[1];
   const units = item.units;
+  const esku = isEsku || item.isEinzelneSku === true;
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <li style={{
       listStyle: 'none',
-      background: '#FFFFFF',
+      background: esku ? T.accent.bg : '#FFFFFF',
       borderRadius: 14,
       overflow: 'hidden',
     }}>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '34px 64px minmax(80px, auto) 1fr minmax(120px, auto)',
-        alignItems: 'center',
-        gap: 12,
-        padding: '11px 14px',
-      }}>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setExpanded((v) => !v);
+          }
+        }}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '34px 38px 64px minmax(80px, auto) 1fr minmax(120px, auto) 16px',
+          alignItems: 'center',
+          gap: 12,
+          padding: '11px 14px',
+          cursor: 'pointer',
+        }}
+      >
         {/* Position number */}
         <span style={{
           fontFamily: T.font.mono,
@@ -2831,6 +2943,26 @@ function BetaArticleRow({ item, pos, isEsku = false }) {
         }}>
           {String(pos).padStart(2, '0')}
         </span>
+
+        {/* ESKU badge — visible marker for Einzelne-SKU rows */}
+        {esku ? (
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '2px 6px',
+            background: T.accent.main,
+            color: '#FFFFFF',
+            fontFamily: T.font.mono,
+            fontSize: 9.5,
+            fontWeight: 800,
+            letterSpacing: '0.1em',
+            borderRadius: 4,
+            justifySelf: 'start',
+          }}>
+            ESKU
+          </span>
+        ) : <span />}
 
         {/* Units */}
         <span
@@ -2936,8 +3068,163 @@ function BetaArticleRow({ item, pos, isEsku = false }) {
             {item.code || item.useItem || item.fnsku || '—'}
           </span>
         )}
+
+        {/* Expand chevron */}
+        <span
+          aria-hidden
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: T.text.faint,
+            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 180ms cubic-bezier(0.16,1,0.3,1)',
+          }}
+        >
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
+            <path d="M2 1l4 3.5-4 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
       </div>
+
+      {expanded && (
+        <BetaArticleDetail item={item} level={lvl} meta={meta} isEsku={esku} />
+      )}
     </li>
+  );
+}
+
+function BetaArticleDetail({ item, level, meta, isEsku }) {
+  const codes: Array<[string, string | null | undefined]> = [
+    ['FNSKU',    item.fnsku],
+    ['SKU',      item.sku],
+    ['EAN',      item.ean],
+    ['ASIN',     item.asin],
+    ['Use-Item', item.useItem],
+  ];
+  const visibleCodes = codes.filter(([, v]) => v);
+  const flags = (item.placementMeta?.flags || []) as unknown[];
+  const eskuCartons = isEsku
+    ? (item.placementMeta?.cartonsHere ?? item.einzelneSku?.cartonsCount ?? null)
+    : null;
+  const eskuPacksPerCarton = isEsku ? (item.einzelneSku?.packsPerCarton ?? null) : null;
+  const lst = (() => {
+    const t = item.title || '';
+    if (!t) return null;
+    if (/\bmit\s+lst\b/i.test(t)) return 'mit LST';
+    if (/\bohne\s+lst\b/i.test(t)) return 'ohne LST';
+    if (/\bohne\s+(?:sepa[-\s]*)?lastschrift(?:text)?\b/i.test(t)) return 'ohne LST';
+    if (/\b(?:sepa[-\s]*)?lastschrift(?:text)?\b/i.test(t)) return 'mit LST';
+    if (/\bsepa[-\s]*druck\b/i.test(t)) return 'mit LST';
+    return null;
+  })();
+
+  return (
+    <div style={{
+      padding: '12px 18px 14px 18px',
+      borderTop: `1px dashed ${T.border.subtle}`,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      animation: 'mp-prf-rise 220ms cubic-bezier(0.16,1,0.3,1)',
+    }}>
+      <BetaDetailField label="Titel" value={item.title || '—'} multiline />
+
+      {visibleCodes.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: '8px 18px',
+        }}>
+          {visibleCodes.map(([k, v]) => (
+            <BetaDetailField key={k} label={k} value={String(v)} mono />
+          ))}
+        </div>
+      )}
+
+      {item.dimStr && (
+        <BetaDetailField label="Maße" value={item.dimStr} mono />
+      )}
+
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '6px 8px',
+        alignItems: 'center',
+      }}>
+        <BetaDetailPill>
+          <span style={{ width: 6, height: 6, background: meta.color, borderRadius: 2, marginRight: 5 }} />
+          L{level} {meta.name}
+        </BetaDetailPill>
+        {item.units != null && !isEsku && (
+          <BetaDetailPill>× {item.units.toLocaleString('de-DE')} Stück</BetaDetailPill>
+        )}
+        {isEsku && eskuCartons != null && (
+          <BetaDetailPill accent>⬢ ESKU · {eskuCartons} Karton{eskuCartons === 1 ? '' : 's'}</BetaDetailPill>
+        )}
+        {isEsku && eskuPacksPerCarton != null && (
+          <BetaDetailPill>{eskuPacksPerCarton} Einh./Karton</BetaDetailPill>
+        )}
+        {lst && <BetaDetailPill>{lst}</BetaDetailPill>}
+        {flags.map((f, k) => (
+          <BetaDetailPill key={k} warn>{String(f)}</BetaDetailPill>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BetaDetailField({ label, value, mono, multiline }: any) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{
+        fontFamily: T.font.mono,
+        fontSize: 10,
+        fontWeight: 600,
+        color: T.text.faint,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        marginBottom: 3,
+      }}>
+        {label}
+      </div>
+      <div style={{
+        fontFamily: mono ? T.font.mono : 'inherit',
+        fontSize: 13,
+        fontWeight: 500,
+        color: T.text.primary,
+        wordBreak: mono ? 'break-all' : 'break-word',
+        lineHeight: multiline ? 1.45 : 1.3,
+        letterSpacing: '-0.005em',
+      }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function BetaDetailPill({ children, accent, warn }: any) {
+  const palette = warn
+    ? { bg: T.status.warn.bg, color: T.status.warn.text, border: T.status.warn.border }
+    : accent
+    ? { bg: T.accent.bg, color: T.accent.text, border: T.accent.border }
+    : { bg: T.bg.surface, color: T.text.secondary, border: T.border.primary };
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      fontFamily: T.font.mono,
+      fontSize: 10.5,
+      fontWeight: 600,
+      padding: '2px 8px',
+      background: palette.bg,
+      color: palette.color,
+      border: `1px solid ${palette.border}`,
+      borderRadius: 999,
+      letterSpacing: '0.04em',
+    }}>
+      {children}
+    </span>
   );
 }
 
@@ -3186,7 +3473,7 @@ function BetaFilterChip({ active, onClick, children }) {
   );
 }
 
-function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet }) {
+function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet, naked = false }: any) {
   const total = hinweise.rows.length;
   const worstSev: 'high' | 'medium' | 'low' =
     hinweise.high.length > 0 ? 'high'
@@ -3202,9 +3489,8 @@ function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet 
   const hasUnackedAckable = hinweise.rows.some((r) => r.ackable && !acked.has(r.ackKey || ''));
   const [open, setOpen] = useState(false);
 
-  return (
-    <BetaPaperCard>
-      <BetaWhitePanel padding={open ? '22px 26px' : '14px 22px'}>
+  const inner = (
+    <BetaWhitePanel padding="18px 22px">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
@@ -3313,8 +3599,8 @@ function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet 
           </>
         )}
       </BetaWhitePanel>
-    </BetaPaperCard>
   );
+  return naked ? inner : <BetaPaperCard>{inner}</BetaPaperCard>;
 }
 
 function BetaHinweiseCountChip({ count, color, bg }) {

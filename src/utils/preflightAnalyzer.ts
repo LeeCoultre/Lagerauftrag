@@ -264,15 +264,10 @@ function pushCapacityFlags(flags, distribution) {
           target: { palletId: pid },
         });
       }
-      if (wPct >= NEAR_OVERLOAD_PCT) {
-        flags.push({
-          kind: 'capacity',
-          severity: 'warn',
-          code: 'NEAR_OVERLOAD_W',
-          message: `${pid}: Gewicht ${Math.round(ps.weightKg)} kg (${Math.round(wPct * 100)}%) — knapp am 700 kg Soft-Limit.`,
-          target: { palletId: pid },
-        });
-      }
+      // No NEAR_OVERLOAD_W warning — user explicitly wants silence until
+      // the actual OVERLOAD-W triggers (weight > 705 kg with tolerance).
+      // The 95% near-limit warning at ~665 kg was too noisy for normal
+      // operation; OVERLOAD-W is the only weight signal the worker sees.
     }
   }
 

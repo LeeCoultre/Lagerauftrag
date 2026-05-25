@@ -28,6 +28,7 @@ import {
   sortPallets, formatItemTitle,
 } from '@/utils/auftragHelpers.js';
 import { getAuftrag } from '@/marathonApi.js';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 /* ════════════════════════════════════════════════════════════════════════ */
 const SORT_MODES = [
@@ -48,8 +49,19 @@ const LST_OHNE_FULL  = /\bohne\s+(?:sepa[-\s]*)?lastschrift(?:text)?\b/i;
 const LST_FULL_POS   = /\b(?:sepa[-\s]*)?lastschrift(?:text)?\b/i;
 const LST_SEPA_DRUCK = /\bsepa[-\s]*druck\b/i;
 
-/* ════════════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════════════
+   Top-level router — branches on the global beta-design flag. Classic body
+   below is byte-identical to the pre-beta cockpit; beta body lives at the
+   end of the file (see BetaWarteschlange).
+   ════════════════════════════════════════════════════════════════════════ */
 export default function WarteschlangeScreen({ onRoute }) {
+  const { beta } = useBetaDesign();
+  if (beta) return <BetaWarteschlange onRoute={onRoute} />;
+  return <ClassicWarteschlange onRoute={onRoute} />;
+}
+
+/* ════════════════════════════════════════════════════════════════════════ */
+function ClassicWarteschlange({ onRoute }) {
   const {
     queue, current,
     addFiles, startEntry,
@@ -1946,6 +1958,2697 @@ function Kbd({ children }) {
       borderRadius: 3,
       lineHeight: 1,
     }}>
+      {children}
+    </span>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   ═══════════════════════ BETA — paper-island redesign ═══════════════════
+   Activated when the global beta-design flag is on. Classic body above is
+   untouched. Visual language mirrors BetaPruefen / BetaFocus: paper-island
+   #F4F5F7 cards with halo + 2px white rim, Outfit font (via [data-beta=1]
+   in index.css), big mono numbers, hairline dividers between rows. The
+   inline-accordion preview is replaced with a slide-in side drawer so the
+   list never grows by 600px when a worker peeks at a pallet shape.
+   ════════════════════════════════════════════════════════════════════════ */
+
+const BETA_PAPER_BG     = '#F4F5F7';
+const BETA_PAPER_RIM    = '#FFFFFF';
+const BETA_PAPER_RADIUS = 32;
+const BETA_INNER_RADIUS = 24;
+const BETA_DRAWER_WIDTH = 720;
+
+/* ──────────────────────────────────────────────────────────────────────── */
+function BetaWarteschlange({ onRoute }) {
+  const {
+    queue, current,
+    addFiles, startEntry,
+    removeFromQueue, reorderQueue, reorderQueueTo, clearQueue,
+  } = useAppState();
+
+  const [over, setOver]               = useState(false);
+  const [busy, setBusy]               = useState(false);
+  const [sortMode, setSortMode]       = useState('fifo');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterMode, setFilterMode]   = useState('all');
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [dragFromIdx, setDragFromIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  const [drawerEntryId, setDrawerEntryId] = useState<string | null>(null);
+  const [flash, setFlash]             = useState<string | null>(null);
+
+  const inputRef  = useRef<HTMLInputElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  /* enrichment per entry — same shape as classic */
+  const entries = useMemo(
+    () => queue.map((entry) => {
+      const pallets       = entry.parsed?.pallets || [];
+      const eskuItems     = entry.parsed?.einzelneSkuItems || [];
+      const palletCount   = entry.palletCount ?? pallets.length;
+      const articleCount  = entry.articleCount
+        ?? pallets.reduce((s, p) => s + (p.items?.length || 0), 0);
+      const units         = entry.unitsCount ?? entry.parsed?.meta?.totalUnits ?? 0;
+      const fp            = pallets.length ? computeFingerprint(pallets, eskuItems) : null;
+      const etaSec        = pallets.length ? estimateOrderSeconds(pallets) : null;
+      return {
+        ...entry,
+        _fp: fp,
+        _etaSec: etaSec,
+        _palletCount: palletCount,
+        _articleCount: articleCount,
+        _units: units,
+      };
+    }),
+    [queue],
+  );
+
+  const visible = useMemo(
+    () => filterAndSearch(entries, searchQuery, filterMode)
+      .map((e, i) => ({ ...e, _displayIdx: i })),
+    [entries, searchQuery, filterMode],
+  );
+
+  useEffect(() => {
+    if (selectedIdx >= visible.length) {
+      setSelectedIdx(Math.max(0, visible.length - 1));
+    }
+  }, [visible.length, selectedIdx]);
+
+  const headId = useMemo(
+    () => queue.find((q) => q.status !== 'error')?.id ?? null,
+    [queue],
+  );
+
+  /* Close the drawer if its entry left the queue. */
+  useEffect(() => {
+    if (drawerEntryId && !queue.some((q) => q.id === drawerEntryId)) {
+      setDrawerEntryId(null);
+    }
+  }, [queue, drawerEntryId]);
+
+  /* Auto-dismiss flash messages after 2.5s. */
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 2500);
+    return () => clearTimeout(t);
+  }, [flash]);
+
+  /* Lock body scroll while the drawer is open (matches modal convention). */
+  useEffect(() => {
+    if (!drawerEntryId) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [drawerEntryId]);
+
+  const totals = useMemo(
+    () => entries.reduce((acc: { pallets: number; articles: number; units: number; etaSec: number }, e) => ({
+      pallets:  acc.pallets  + e._palletCount,
+      articles: acc.articles + e._articleCount,
+      units:    acc.units    + Number(e._units || 0),
+      etaSec:   acc.etaSec   + (e._etaSec ?? 0),
+    }), { pallets: 0, articles: 0, units: 0, etaSec: 0 }),
+    [entries],
+  );
+
+  const acceptFiles = useCallback(async (fl: FileList | File[] | null) => {
+    const arr = Array.from(fl || []).filter((f: File) => /\.docx$/i.test(f.name));
+    if (!arr.length) return;
+    setBusy(true);
+    try {
+      const built = await addFiles(arr);
+      if (!current && queue.length === 0 && built[0]?.status === 'ready') {
+        setTimeout(() => startEntry(built[0].id), 100);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [addFiles, current, queue.length, startEntry]);
+
+  const applySort = useCallback((mode) => {
+    setSortMode(mode);
+    if (mode === 'fifo') return;
+    const sorted = sortEntries(entries, mode);
+    const orderedIds = sorted.map((e) => e.id);
+    reorderQueueTo(orderedIds);
+  }, [entries, reorderQueueTo]);
+
+  /* drag-and-drop reorder — same as classic, only the visual indicator differs */
+  const onDragStart = (idx) => (e) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(idx));
+    setDragFromIdx(idx);
+  };
+  const onDragOver = (idx) => (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragFromIdx === null) return;
+    if (idx !== dragOverIdx) setDragOverIdx(idx);
+  };
+  const onDrop = (idx) => (e) => {
+    e.preventDefault();
+    if (dragFromIdx !== null && dragFromIdx !== idx) {
+      const from = visible[dragFromIdx];
+      const to   = visible[idx];
+      const fromQ = queue.findIndex((q) => q.id === from?.id);
+      const toQ   = queue.findIndex((q) => q.id === to?.id);
+      if (fromQ >= 0 && toQ >= 0) reorderQueue(fromQ, toQ);
+    }
+    setDragFromIdx(null);
+    setDragOverIdx(null);
+  };
+  const onDragEnd = () => {
+    setDragFromIdx(null);
+    setDragOverIdx(null);
+  };
+
+  /* keyboard cockpit — extended: Esc closes the drawer first, then clears
+     search, then sheds selection */
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = e.target.tagName;
+      const inField = tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable;
+
+      if (e.key === '/' && !inField) {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (drawerEntryId) {
+          setDrawerEntryId(null);
+          return;
+        }
+        if (document.activeElement === searchRef.current) {
+          searchRef.current?.blur();
+          if (searchQuery) setSearchQuery('');
+          return;
+        }
+      }
+      if (inField) return;
+      if (!visible.length) return;
+
+      if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowDown') {
+        e.preventDefault();
+        const target = visible[selectedIdx];
+        const idx = queue.findIndex((q) => q.id === target?.id);
+        if (idx >= 0 && idx < queue.length - 1) reorderQueue(idx, idx + 1);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowUp') {
+        e.preventDefault();
+        const target = visible[selectedIdx];
+        const idx = queue.findIndex((q) => q.id === target?.id);
+        if (idx > 0) reorderQueue(idx, idx - 1);
+      } else if (e.key === 'j' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.min(visible.length - 1, i + 1));
+      } else if (e.key === 'k' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.max(0, i - 1));
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const target = visible[selectedIdx];
+        if (!target || current || target.status === 'error') return;
+        if (headId && target.id !== headId) {
+          setFlash('Reihenfolge beachten — erst den obersten Auftrag starten.');
+          return;
+        }
+        startEntry(target.id);
+        if (onRoute) onRoute('workspace');
+      } else if (e.key === 'x' || e.key === 'Delete') {
+        e.preventDefault();
+        const target = visible[selectedIdx];
+        if (target) removeFromQueue(target.id);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [
+    visible, selectedIdx, queue, current, searchQuery, headId, drawerEntryId,
+    startEntry, removeFromQueue, reorderQueue, onRoute,
+  ]);
+
+  const hasQueue = entries.length > 0;
+  const noResults = hasQueue && visible.length === 0;
+  const headEntry = visible.find((e) => e.id === headId) || null;
+  const secondaryEntries = headEntry
+    ? visible.filter((e) => e.id !== headEntry.id)
+    : visible;
+  const drawerEntry = useMemo(
+    () => (drawerEntryId ? entries.find((e) => e.id === drawerEntryId) || null : null),
+    [entries, drawerEntryId],
+  );
+
+  /* row handler factory — shared by NEXT card and secondary rows */
+  const rowHandlers = (entry, displayIdx) => {
+    const qi = queue.findIndex((q) => q.id === entry.id);
+    return {
+      onSelect: () => setSelectedIdx(displayIdx),
+      onStart: () => {
+        if (entry.status === 'error') return;
+        if (headId && entry.id !== headId) {
+          setFlash('Reihenfolge beachten — erst den obersten Auftrag starten.');
+          return;
+        }
+        startEntry(entry.id);
+        if (onRoute) onRoute('workspace');
+      },
+      onRemove: () => removeFromQueue(entry.id),
+      onPreview: () => setDrawerEntryId(entry.id),
+      onUp:   qi > 0 ? () => reorderQueue(qi, qi - 1) : null,
+      onDown: qi >= 0 && qi < queue.length - 1 ? () => reorderQueue(qi, qi + 1) : null,
+      onDragStart: onDragStart(displayIdx),
+      onDragOver:  onDragOver(displayIdx),
+      onDrop:      onDrop(displayIdx),
+      onDragEnd,
+      isDragging:  dragFromIdx === displayIdx,
+      isDropAbove: dragFromIdx !== null && dragOverIdx === displayIdx && dragFromIdx > displayIdx,
+      isDropBelow: dragFromIdx !== null && dragOverIdx === displayIdx && dragFromIdx < displayIdx,
+    };
+  };
+
+  return (
+    <Page>
+      <BetaWarteschlangeStyles />
+
+      <main style={{
+        maxWidth: 1080,
+        margin: '0 auto',
+        padding: '32px 32px 180px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+      }}>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".docx"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => { acceptFiles(e.target.files); e.target.value = ''; }}
+        />
+
+        {/* HERO — when a workflow is in progress, the active Auftrag is the
+            dominant card; the head-of-queue moves into the compact mini
+            below. When no workflow is active, the head-of-queue takes the
+            full hero treatment so the worker sees what to start next. */}
+        {current ? (
+          <BetaCurrentHeroCard current={current} onRoute={onRoute} />
+        ) : hasQueue && !noResults && headEntry && (() => {
+          const displayIdx = visible.findIndex((e) => e.id === headEntry.id);
+          return (
+            <BetaNextCard
+              entry={headEntry}
+              queueIdx={queue.findIndex((q) => q.id === headEntry.id)}
+              isSelected={displayIdx === selectedIdx}
+              hasCurrent={false}
+              {...rowHandlers(headEntry, displayIdx)}
+            />
+          );
+        })()}
+
+        {/* MINI next-up — only when current workflow is running */}
+        {current && hasQueue && !noResults && headEntry && (() => {
+          const displayIdx = visible.findIndex((e) => e.id === headEntry.id);
+          return (
+            <BetaNextMiniCard
+              entry={headEntry}
+              queueIdx={queue.findIndex((q) => q.id === headEntry.id)}
+              isSelected={displayIdx === selectedIdx}
+              {...rowHandlers(headEntry, displayIdx)}
+            />
+          );
+        })()}
+
+        {/* SECONDARY rows */}
+        {hasQueue && !noResults && secondaryEntries.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }}>
+            <div style={{ paddingLeft: 4 }}>
+              <BetaEyebrow>
+                Danach · {secondaryEntries.length} {secondaryEntries.length === 1 ? 'weiterer' : 'weitere'}
+              </BetaEyebrow>
+            </div>
+            <BetaPaperCard>
+              <BetaWhitePanel padding="6px 8px">
+                <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                  {secondaryEntries.map((entry, k) => {
+                    const displayIdx = visible.findIndex((e) => e.id === entry.id);
+                    return (
+                      <BetaQueueRow
+                        key={entry.id}
+                        entry={entry}
+                        queueIdx={queue.findIndex((q) => q.id === entry.id)}
+                        isSelected={displayIdx === selectedIdx}
+                        hasCurrent={!!current}
+                        isFirst={k === 0}
+                        isLast={k === secondaryEntries.length - 1}
+                        {...rowHandlers(entry, displayIdx)}
+                      />
+                    );
+                  })}
+                </ul>
+              </BetaWhitePanel>
+            </BetaPaperCard>
+          </div>
+        )}
+
+        {/* NO RESULTS */}
+        {noResults && (
+          <BetaPaperCard>
+            <BetaWhitePanel padding="36px 32px">
+              <div style={{ textAlign: 'center', color: T.text.subtle, fontSize: 13.5 }}>
+                Keine Aufträge passen zu Suche oder Filter.
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'center', marginTop: 14 }}>
+                <button
+                  type="button"
+                  onClick={() => { setSearchQuery(''); setFilterMode('all'); }}
+                  style={{
+                    all: 'unset',
+                    cursor: 'pointer',
+                    padding: '8px 16px',
+                    borderRadius: 999,
+                    background: BETA_PAPER_BG,
+                    fontFamily: T.font.ui,
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    color: T.text.secondary,
+                  }}
+                >
+                  Filter zurücksetzen
+                </button>
+              </div>
+            </BetaWhitePanel>
+          </BetaPaperCard>
+        )}
+
+        {/* EMPTY */}
+        {!hasQueue && (
+          <BetaQueueEmpty
+            over={over}
+            busy={busy}
+            onPick={() => inputRef.current?.click()}
+            onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+            onDragLeave={() => setOver(false)}
+            onDrop={(e) => { e.preventDefault(); setOver(false); acceptFiles(e.dataTransfer.files); }}
+          />
+        )}
+
+        {hasQueue && <BetaKbdHints />}
+      </main>
+
+      {/* BOTTOM DOCK — floating island with search/sort/filter/upload */}
+      <BetaActionDock
+        entryCount={entries.length}
+        showControls={entries.length >= 2}
+        showSearch={entries.length >= 5}
+        searchQuery={searchQuery} onSearch={setSearchQuery} searchRef={searchRef}
+        sortMode={sortMode} onSortMode={applySort}
+        filterMode={filterMode} onFilter={setFilterMode}
+        onClearQueue={clearQueue}
+        over={over} busy={busy}
+        onPickFile={() => inputRef.current?.click()}
+        onFileDragOver={(e) => { e.preventDefault(); setOver(true); }}
+        onFileDragLeave={() => setOver(false)}
+        onFileDrop={(e) => { e.preventDefault(); setOver(false); acceptFiles(e.dataTransfer.files); }}
+      />
+
+      {/* DRAWER + backdrop */}
+      {drawerEntry && (
+        <BetaPreviewDrawer
+          entry={drawerEntry}
+          onClose={() => setDrawerEntryId(null)}
+        />
+      )}
+
+      {/* FLASH */}
+      {flash && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            left: '50%',
+            bottom: 32,
+            transform: 'translateX(-50%)',
+            padding: '12px 20px',
+            background: T.text.primary,
+            color: '#FFFFFF',
+            fontFamily: T.font.ui,
+            fontSize: 13,
+            letterSpacing: '-0.005em',
+            borderRadius: 14,
+            boxShadow: '0 18px 38px rgba(0,0,0,0.22)',
+            zIndex: 1200,
+          }}
+        >
+          {flash}
+        </div>
+      )}
+    </Page>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Beta atoms — cloned from BetaPruefen for visual consistency.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaWarteschlangeStyles() {
+  return (
+    <style>{`
+      @keyframes mb-q-rise {
+        0%   { opacity: 0; transform: translateY(8px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes mb-q-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255,91,31,0.0); }
+        50%      { box-shadow: 0 0 0 8px rgba(255,91,31,0.18); }
+      }
+      @keyframes mb-q-drawer-in {
+        0%   { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
+        100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      }
+      @keyframes mb-q-backdrop-in {
+        0%   { opacity: 0; }
+        100% { opacity: 1; }
+      }
+      @keyframes mb-q-spin {
+        to { transform: rotate(360deg); }
+      }
+      @keyframes mb-q-menu-in {
+        0%   { opacity: 0; transform: translateY(6px) scale(0.97); }
+        100% { opacity: 1; transform: translateY(0)   scale(1);    }
+      }
+      @media (max-width: 900px) {
+        .mb-q-drawer { width: calc(100vw - 24px) !important; max-height: calc(100vh - 24px) !important; }
+        .mb-q-backdrop { background: rgba(15,23,42,0.42) !important; }
+      }
+      .mb-q-row:hover .mb-q-row-actions { opacity: 1; }
+      .mb-q-row:hover .mb-q-row-fba    { color: ${T.text.primary}; }
+    `}</style>
+  );
+}
+
+function BetaPaperCard({ children, glow = false, padding = 8 }: { children?: React.ReactNode; glow?: boolean; padding?: number }) {
+  return (
+    <div style={{
+      padding,
+      background: BETA_PAPER_BG,
+      border: `2px solid ${BETA_PAPER_RIM}`,
+      borderRadius: BETA_PAPER_RADIUS,
+      boxShadow: glow
+        ? '0 0 0 0.5px rgba(255,91,31,0.18), 0 16px 48px rgba(255,91,31,0.10), 0 0 89.7px rgba(0,0,0,0.05)'
+        : '0 0 89.7px rgba(0,0,0,0.05)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaWhitePanel({ children, padding, id }: { children?: React.ReactNode; padding?: string; id?: string }) {
+  return (
+    <div id={id} style={{
+      background: '#FFFFFF',
+      borderRadius: BETA_INNER_RADIUS,
+      padding: padding || '22px 26px',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaEyebrow({ children, color, dot }: { children?: React.ReactNode; color?: string; dot?: boolean }) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      fontSize: 10.5,
+      fontWeight: 700,
+      fontFamily: T.font.mono,
+      color: color || T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.18em',
+    }}>
+      {dot && (
+        <span style={{
+          width: 7, height: 7,
+          borderRadius: '50%',
+          background: color || T.accent.main,
+        }} />
+      )}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function BetaMetaDot() {
+  return (
+    <span aria-hidden style={{
+      width: 3, height: 3, borderRadius: '50%',
+      background: 'rgba(15, 23, 42, 0.22)',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function BetaKbd({ children, dim = false }: { children?: React.ReactNode; dim?: boolean }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 22, height: 20,
+      padding: '0 7px',
+      fontSize: 10.5,
+      fontFamily: T.font.mono,
+      fontWeight: 700,
+      color: dim ? T.text.faint : T.text.secondary,
+      background: dim ? 'transparent' : BETA_PAPER_BG,
+      borderRadius: 6,
+      lineHeight: 1,
+      letterSpacing: '0.04em',
+    }}>{children}</span>
+  );
+}
+
+function BetaBigCopy({ value, rawValue, size = 'lg' }: { value: React.ReactNode; rawValue: string; size?: 'lg' | 'md' }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = (e) => {
+    e.stopPropagation();
+    betaCopyToClipboard(rawValue);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => { onClick(e); e.currentTarget.blur(); }}
+      title={copied ? 'Kopiert' : 'Klick zum Kopieren'}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: '6px 10px',
+        marginLeft: -10,
+        background: copied ? T.status.success.bg : 'transparent',
+        borderRadius: 12,
+        transition: 'background 220ms ease',
+      }}
+    >
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: size === 'lg' ? 'clamp(28px, 3.8vw, 44px)' : 'clamp(18px, 2vw, 22px)',
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.primary,
+        letterSpacing: '-0.025em',
+        lineHeight: 1.05,
+        wordBreak: 'break-all',
+        transition: 'color 220ms ease',
+      }}>
+        {value}
+      </span>
+      {copied && (
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 10,
+          fontWeight: 600,
+          color: T.status.success.text,
+          letterSpacing: '0.10em',
+          textTransform: 'uppercase',
+        }}>
+          ✓ Kopiert
+        </span>
+      )}
+    </button>
+  );
+}
+
+function betaCopyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackBetaCopy(text));
+    return;
+  }
+  fallbackBetaCopy(text);
+}
+function fallbackBetaCopy(text: string) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '0';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch { /* silent */ }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Action Dock — fixed-bottom floating paper-island that consolidates
+   upload + search + sort + filter + bulk-remove in one compact row.
+   Replaces the old cockpit; keeps the controls always within thumb-reach
+   without competing with the queue content above.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaActionDock({
+  entryCount,
+  showControls, showSearch,
+  searchQuery, onSearch, searchRef,
+  sortMode, onSortMode,
+  filterMode, onFilter,
+  onClearQueue,
+  over, busy,
+  onPickFile, onFileDragOver, onFileDragLeave, onFileDrop,
+}) {
+  /* When queue is empty the EmptyState big dropzone is the primary CTA —
+     hide the dock so it doesn't compete. */
+  const [openMenu, setOpenMenu] = useState<'sort' | 'filter' | null>(null);
+
+  /* Click-outside + Esc close. Capture-phase mousedown so a click on a
+     menu item still gets to fire its own handler before the outside
+     listener fires on the document target. */
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest('[data-dock-menu]')) setOpenMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenu(null);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openMenu]);
+
+  if (entryCount === 0) return null;
+
+  const currentSort   = SORT_MODES.find((m) => m.id === sortMode)   || SORT_MODES[0];
+  const currentFilter = FILTER_MODES.find((m) => m.id === filterMode) || FILTER_MODES[0];
+
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 18,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      maxWidth: 'calc(100vw - 24px)',
+      zIndex: 60,
+      pointerEvents: 'auto',
+    }}>
+      <BetaPaperCard padding={6}>
+        <BetaWhitePanel padding="6px 8px">
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            flexWrap: 'nowrap',
+          }}>
+            <BetaDockUploadButton
+              over={over} busy={busy}
+              onPickFile={onPickFile}
+              onDragOver={onFileDragOver}
+              onDragLeave={onFileDragLeave}
+              onDrop={onFileDrop}
+            />
+
+            {showSearch && (
+              <>
+                <BetaDockSep />
+                <BetaSearchInput
+                  value={searchQuery}
+                  onChange={onSearch}
+                  refEl={searchRef}
+                  placeholder="FBA / Datei…"
+                  compact
+                />
+              </>
+            )}
+
+            {showControls && (
+              <>
+                <BetaDockSep />
+                <BetaDockMenu
+                  label="Sortieren"
+                  current={currentSort.label}
+                  open={openMenu === 'sort'}
+                  onToggle={() => setOpenMenu((c) => c === 'sort' ? null : 'sort')}
+                  icon={
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+                         stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 4h8M4 7h6M5 10h4" />
+                    </svg>
+                  }
+                  options={SORT_MODES.map((m) => ({
+                    id: m.id, label: m.label, hint: m.hint, active: sortMode === m.id,
+                  }))}
+                  onPick={(id) => { onSortMode(id); setOpenMenu(null); }}
+                />
+              </>
+            )}
+
+            {showSearch && (
+              <>
+                <BetaDockSep />
+                <BetaDockMenu
+                  label="Filter"
+                  current={currentFilter.label}
+                  open={openMenu === 'filter'}
+                  onToggle={() => setOpenMenu((c) => c === 'filter' ? null : 'filter')}
+                  icon={
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+                         stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2 3h10l-3.5 4.5V11l-3 1.5V7.5z" />
+                    </svg>
+                  }
+                  options={FILTER_MODES.map((m) => ({
+                    id: m.id, label: m.label, hint: null, active: filterMode === m.id,
+                  }))}
+                  onPick={(id) => { onFilter(id); setOpenMenu(null); }}
+                />
+              </>
+            )}
+
+            {entryCount >= 2 && (
+              <>
+                <BetaDockSep />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm(`${entryCount} Aufträge wirklich aus der Warteschlange entfernen?`)) {
+                      onClearQueue();
+                    }
+                  }}
+                  title={`Alle ${entryCount} aus Warteschlange entfernen`}
+                  style={{
+                    all: 'unset',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 32, height: 32,
+                    borderRadius: 999,
+                    color: T.text.subtle,
+                    transition: 'background 160ms ease, color 160ms ease',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = T.status.danger.bg;
+                    e.currentTarget.style.color = T.status.danger.text;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = T.text.subtle;
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                    <path d="M2 4h10M5 4V2.5h4V4M3.5 4l.5 8h6l.5-8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </>
+            )}
+          </div>
+        </BetaWhitePanel>
+      </BetaPaperCard>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Dock menu — compact pill trigger that opens a popover upward.            */
+function BetaDockMenu({
+  label, current, open, onToggle, options, onPick, icon,
+}: {
+  label: string;
+  current: React.ReactNode;
+  open: boolean;
+  onToggle: () => void;
+  options: Array<{ id: string; label: React.ReactNode; hint?: string | null; active?: boolean }>;
+  onPick: (id: string) => void;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div data-dock-menu style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={label}
+        style={{
+          all: 'unset',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '7px 12px',
+          borderRadius: 999,
+          background: open ? BETA_PAPER_BG : 'transparent',
+          color: open ? T.text.primary : T.text.secondary,
+          fontFamily: T.font.ui,
+          fontSize: 12,
+          fontWeight: 600,
+          letterSpacing: '-0.005em',
+          transition: 'background 160ms ease, color 160ms ease',
+        }}
+        onMouseEnter={(e) => {
+          if (!open) e.currentTarget.style.background = BETA_PAPER_BG;
+        }}
+        onMouseLeave={(e) => {
+          if (!open) e.currentTarget.style.background = 'transparent';
+        }}
+      >
+        {icon && (
+          <span style={{
+            display: 'inline-flex',
+            color: T.text.faint,
+          }}>
+            {icon}
+          </span>
+        )}
+        <span>{current}</span>
+        <svg
+          width="9" height="9" viewBox="0 0 10 10" fill="none"
+          style={{
+            color: T.text.faint,
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 200ms cubic-bezier(0.16,1,0.3,1)',
+          }}
+        >
+          <path d="M2.5 4l2.5 2.5L7.5 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: 'absolute',
+            bottom: 'calc(100% + 8px)',
+            left: 0,
+            minWidth: 200,
+            padding: 6,
+            background: BETA_PAPER_BG,
+            border: `2px solid ${BETA_PAPER_RIM}`,
+            borderRadius: 18,
+            boxShadow: '0 16px 48px rgba(15,23,42,0.18), 0 0 89.7px rgba(0,0,0,0.05)',
+            animation: 'mb-q-menu-in 200ms cubic-bezier(0.16,1,0.3,1)',
+          }}
+        >
+          <div style={{
+            background: '#FFFFFF',
+            borderRadius: 12,
+            padding: 4,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}>
+            {options.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                role="menuitem"
+                onClick={(e) => { e.stopPropagation(); onPick(opt.id); }}
+                title={opt.hint || undefined}
+                style={{
+                  all: 'unset',
+                  cursor: 'pointer',
+                  display: 'grid',
+                  gridTemplateColumns: '14px 1fr auto',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '9px 12px',
+                  borderRadius: 10,
+                  background: opt.active ? T.accent.bg : 'transparent',
+                  color: opt.active ? T.accent.text : T.text.primary,
+                  fontFamily: T.font.ui,
+                  fontSize: 12.5,
+                  fontWeight: opt.active ? 600 : 500,
+                  letterSpacing: '-0.005em',
+                  transition: 'background 140ms ease',
+                }}
+                onMouseEnter={(e) => {
+                  if (!opt.active) e.currentTarget.style.background = BETA_PAPER_BG;
+                }}
+                onMouseLeave={(e) => {
+                  if (!opt.active) e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 14, height: 14,
+                  color: opt.active ? T.accent.text : 'transparent',
+                }}>
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                    <path d="M2.5 6.5l2 2 5-5.5" stroke="currentColor" strokeWidth="2"
+                          strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+                <span>{opt.label}</span>
+                {opt.hint && (
+                  <span style={{
+                    fontSize: 10.5,
+                    color: T.text.faint,
+                    fontWeight: 500,
+                    letterSpacing: 0,
+                  }}>
+                    {opt.hint.length > 22 ? opt.hint.slice(0, 22) + '…' : opt.hint}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BetaDockSep() {
+  return (
+    <span aria-hidden style={{
+      width: 1,
+      height: 22,
+      background: 'rgba(15,23,42,0.08)',
+      margin: '0 4px',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function BetaDockUploadButton({ over, busy, onPickFile, onDragOver, onDragLeave, onDrop }) {
+  return (
+    <button
+      type="button"
+      onClick={onPickFile}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      title=".docx anhängen oder hierher ziehen"
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '7px 14px 7px 10px',
+        borderRadius: 999,
+        background: over ? T.accent.bg : BETA_PAPER_BG,
+        boxShadow: over ? `inset 0 0 0 1.5px var(--accent)` : 'none',
+        transition: 'background 180ms ease, box-shadow 180ms ease',
+        flexShrink: 0,
+      }}
+    >
+      <span style={{
+        width: 24, height: 24,
+        borderRadius: 999,
+        background: over ? 'var(--accent)' : '#FFFFFF',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: over ? '#FFFFFF' : T.text.subtle,
+        flexShrink: 0,
+        transition: 'background 180ms ease, color 180ms ease',
+      }}>
+        {busy ? (
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+               style={{ animation: 'mb-q-spin 800ms linear infinite' }}>
+            <circle cx="7" cy="7" r="5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.6" />
+            <path d="M12 7a5 5 0 0 0-5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+               stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M7 10V3M4 6l3-3 3 3" />
+          </svg>
+        )}
+      </span>
+      <span style={{
+        fontFamily: T.font.ui,
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: over ? T.accent.text : T.text.primary,
+        letterSpacing: '-0.005em',
+        transition: 'color 180ms ease',
+      }}>
+        {busy ? 'Lädt…' : (over ? 'Loslassen' : '.docx')}
+      </span>
+    </button>
+  );
+}
+
+function BetaKpiMetric({ value, label, accent = false }: { value: React.ReactNode; label: React.ReactNode; accent?: boolean }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'baseline',
+      gap: 8,
+      padding: '0 8px',
+    }}>
+      <span style={{
+        fontSize: 'clamp(22px, 2.4vw, 30px)',
+        fontWeight: 600,
+        color: accent ? T.accent.text : T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        letterSpacing: '-0.022em',
+        fontFamily: T.font.ui,
+      }}>
+        {value}
+      </span>
+      <span style={{
+        fontSize: 10.5,
+        color: T.text.faint,
+        textTransform: 'uppercase',
+        letterSpacing: '0.12em',
+        fontFamily: T.font.mono,
+        fontWeight: 600,
+      }}>
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function BetaKpiSep() {
+  return (
+    <span aria-hidden style={{
+      width: 1,
+      height: 22,
+      background: 'rgba(15,23,42,0.10)',
+      margin: '0 14px',
+      alignSelf: 'center',
+    }} />
+  );
+}
+
+function BetaSearchInput({ value, onChange, refEl, placeholder, compact = false }: any) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: compact ? 6 : 8,
+      padding: compact ? '6px 10px' : '7px 14px',
+      background: BETA_PAPER_BG,
+      borderRadius: 999,
+      minWidth: compact ? 180 : 240,
+      flex: compact ? '0 1 220px' : '1 1 240px',
+      maxWidth: compact ? 240 : 360,
+    }}>
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none"
+           stroke={T.text.faint} strokeWidth="1.6" strokeLinecap="round">
+        <circle cx="6" cy="6" r="4" />
+        <path d="M9 9l3 3" />
+      </svg>
+      <input
+        ref={refEl}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          all: 'unset',
+          flex: 1,
+          fontFamily: T.font.ui,
+          fontSize: 12.5,
+          color: T.text.primary,
+          minWidth: 0,
+        }}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          aria-label="Suche leeren"
+          style={{
+            all: 'unset',
+            cursor: 'pointer',
+            color: T.text.faint,
+            display: 'inline-flex',
+            padding: 2,
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none"
+               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M3 3l6 6M9 3l-6 6" />
+          </svg>
+        </button>
+      )}
+      <BetaKbd dim>/</BetaKbd>
+    </div>
+  );
+}
+
+function BetaSortChip({ active, onClick, title, children }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        padding: '7px 13px',
+        borderRadius: 999,
+        background: active ? T.text.primary : (hover ? BETA_PAPER_BG : 'transparent'),
+        color: active ? '#FFFFFF' : T.text.secondary,
+        fontFamily: T.font.ui,
+        fontSize: 12,
+        fontWeight: active ? 600 : 500,
+        letterSpacing: '-0.005em',
+        transition: 'background 160ms ease, color 160ms ease',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function BetaFilterChip({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 7,
+        padding: '7px 12px',
+        borderRadius: 999,
+        background: active ? T.accent.bg : 'transparent',
+        fontFamily: T.font.ui,
+        fontSize: 12,
+        fontWeight: 600,
+        color: active ? T.accent.text : T.text.subtle,
+      }}
+    >
+      <span style={{
+        width: 6, height: 6,
+        borderRadius: '50%',
+        background: active ? 'var(--accent)' : T.text.faint,
+      }} />
+      {children}
+    </button>
+  );
+}
+
+function BetaDropPill({ over, busy, onPickFile, onDragOver, onDragLeave, onDrop }) {
+  return (
+    <button
+      type="button"
+      onClick={onPickFile}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '14px 22px',
+        borderRadius: BETA_INNER_RADIUS,
+        background: over ? T.accent.bg : '#FFFFFF',
+        boxShadow: over ? `inset 0 0 0 2px var(--accent)` : 'inset 0 0 0 1px rgba(15,23,42,0.06)',
+        transition: 'background 200ms ease, box-shadow 200ms ease',
+      }}
+    >
+      <span style={{
+        width: 32, height: 32,
+        borderRadius: 999,
+        background: over ? 'var(--accent)' : BETA_PAPER_BG,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: over ? '#FFFFFF' : T.text.subtle,
+        transition: 'background 200ms ease, color 200ms ease',
+      }}>
+        {busy ? (
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+               style={{ animation: 'mb-q-spin 800ms linear infinite' }}>
+            <circle cx="7" cy="7" r="5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.6" />
+            <path d="M12 7a5 5 0 0 0-5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+               stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M7 10V3M4 6l3-3 3 3M2.5 11.5h9" />
+          </svg>
+        )}
+      </span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <span style={{
+          fontFamily: T.font.ui,
+          fontSize: 13.5,
+          fontWeight: 600,
+          color: over ? T.accent.text : T.text.primary,
+          letterSpacing: '-0.005em',
+        }}>
+          {busy ? '.docx wird verarbeitet…' : (over ? 'Loslassen — Datei hinzufügen' : '.docx anhängen oder hierher ziehen')}
+        </span>
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 10.5,
+          color: T.text.faint,
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}>
+          Lagerauftrag · mehrere möglich
+        </span>
+      </div>
+      <span style={{ flex: 1 }} />
+      <span style={{
+        padding: '7px 13px',
+        borderRadius: 999,
+        background: BETA_PAPER_BG,
+        fontFamily: T.font.ui,
+        fontSize: 12,
+        fontWeight: 600,
+        color: T.text.secondary,
+      }}>
+        Datei wählen
+      </span>
+    </button>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Current-Auftrag hero — dominant paper-island when a workflow is active.
+   Same visual rhythm as BetaNextCard (big mono FBA, hairline-divided rows,
+   primary CTA) but tailored for in-progress data (palette x/y, progress
+   bar, Fortsetzen instead of Starten).
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaCurrentHeroCard({ current, onRoute }) {
+  const fba = current.parsed?.meta?.sendungsnummer
+    || current.parsed?.meta?.fbaCode
+    || current.fileName;
+  const fileName = current.fileName;
+  const pallets  = current.parsed?.pallets || [];
+  const totalP   = pallets.length;
+  const curIdx   = current.currentPalletIdx ?? 0;
+  const curNum   = curIdx + 1;
+  const pct      = totalP ? Math.round((curIdx / totalP) * 100) : 0;
+  const totalArticles = pallets.reduce((s, p) => s + (p.items?.length || 0), 0);
+  const totalUnits    = current.parsed?.meta?.totalUnits
+    ?? pallets.reduce((s, p) => s + (p.items || []).reduce((u, it) => u + (Number(it.units) || 0), 0), 0);
+  const remainingSec = pallets.length
+    ? estimateOrderSeconds(pallets.slice(curIdx))
+    : null;
+
+  return (
+    <BetaPaperCard glow>
+      <BetaWhitePanel padding="28px 32px 26px">
+        {/* eyebrow + status row */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
+          marginBottom: 14,
+          flexWrap: 'wrap',
+        }}>
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 10.5,
+            fontWeight: 700,
+            fontFamily: T.font.mono,
+            color: T.accent.text,
+            textTransform: 'uppercase',
+            letterSpacing: '0.18em',
+          }}>
+            <span style={{
+              width: 8, height: 8,
+              borderRadius: '50%',
+              background: T.accent.main,
+              boxShadow: `0 0 0 0 ${T.accent.main}`,
+              animation: 'mb-q-pulse 1800ms ease-in-out infinite',
+            }} />
+            In Bearbeitung
+          </span>
+          <BetaStatusPill tone="accent">Live · {pct}%</BetaStatusPill>
+        </div>
+
+        {/* big mono FBA */}
+        <BetaBigCopy value={fba} rawValue={String(fba || '')} />
+
+        {/* meta line — filename + palette progress + remaining time */}
+        <div style={{
+          marginTop: 6,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
+          fontSize: 12.5,
+          color: T.text.subtle,
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          <span title={fileName} style={{
+            maxWidth: 360,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {fileName}
+          </span>
+          <BetaMetaDot />
+          <span style={{ color: T.text.primary, fontWeight: 600 }}>
+            Palette {curNum} von {totalP}
+          </span>
+          {remainingSec != null && (
+            <>
+              <BetaMetaDot />
+              <span style={{ color: T.accent.text, fontWeight: 600 }}>
+                noch ≈ {fmtDuration(remainingSec)}
+              </span>
+            </>
+          )}
+        </div>
+
+        {/* hairline */}
+        <div style={{
+          height: 1,
+          background: 'rgba(15,23,42,0.08)',
+          margin: '20px 0 16px',
+        }} />
+
+        {/* progress bar */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
+        }}>
+          <span style={{
+            flex: 1,
+            height: 10,
+            borderRadius: 5,
+            background: BETA_PAPER_BG,
+            overflow: 'hidden',
+            position: 'relative',
+          }}>
+            <span style={{
+              display: 'block',
+              height: '100%',
+              width: `${pct}%`,
+              background: T.accent.main,
+              borderRadius: 5,
+              transition: 'width 320ms cubic-bezier(0.16,1,0.3,1)',
+              boxShadow: pct > 0 ? `0 0 0 0.5px ${T.accent.main}` : 'none',
+            }} />
+          </span>
+          <span style={{
+            minWidth: 56,
+            textAlign: 'right',
+            fontFamily: T.font.mono,
+            fontSize: 16,
+            fontWeight: 600,
+            color: T.text.primary,
+            fontVariantNumeric: 'tabular-nums',
+            letterSpacing: '-0.012em',
+          }}>
+            {pct}%
+          </span>
+        </div>
+
+        {/* hairline */}
+        <div style={{
+          height: 1,
+          background: 'rgba(15,23,42,0.08)',
+          margin: '16px 0 18px',
+        }} />
+
+        {/* stats + CTA */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 16,
+          flexWrap: 'wrap',
+        }}>
+          <BetaStat value={totalP} label="Paletten" />
+          <BetaStat value={totalArticles.toLocaleString('de-DE')} label="Artikel" />
+          <BetaStat value={(Number(totalUnits) || 0).toLocaleString('de-DE')} label="Einheiten" />
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={() => onRoute && onRoute('workspace')}
+            style={{
+              all: 'unset',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '12px 22px',
+              borderRadius: 999,
+              background: T.accent.main,
+              color: '#FFFFFF',
+              fontFamily: T.font.ui,
+              fontSize: 13.5,
+              fontWeight: 600,
+              letterSpacing: '-0.005em',
+              boxShadow: '0 8px 22px rgba(255,91,31,0.28)',
+              transition: 'transform 160ms ease, box-shadow 160ms ease',
+            }}
+          >
+            Fortsetzen
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3 6h6m0 0L6 3m3 3L6 9" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      </BetaWhitePanel>
+    </BetaPaperCard>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Mini next-up card — compact paper-island shown when a workflow is active.
+   Reminds the worker which Auftrag will come next without competing with
+   the Fortsetzen hero. Cannot be started directly (current must finish);
+   surfaces Vorschau + reorder + remove inline.
+   ──────────────────────────────────────────────────────────────────────── */
+
+function BetaNextMiniCard({
+  entry, queueIdx, isSelected,
+  onSelect, onRemove, onPreview, onUp, onDown,
+  onDragStart, onDragOver, onDrop, onDragEnd,
+  isDragging, isDropAbove, isDropBelow,
+}) {
+  const fba = entry.parsed?.meta?.sendungsnummer
+    || entry.parsed?.meta?.fbaCode
+    || entry.fileName;
+  const isError = entry.status === 'error';
+  const validErrors = entry.validation?.errorCount || 0;
+  const validWarns  = entry.validation?.warningCount || 0;
+  const fp = entry._fp;
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      onClick={onSelect}
+      style={{
+        position: 'relative',
+        opacity: isDragging ? 0.4 : 1,
+        cursor: 'pointer',
+      }}
+    >
+      {isDropAbove && <BetaDropLine position="above" />}
+      {isDropBelow && <BetaDropLine position="below" />}
+
+      <BetaPaperCard>
+        <BetaWhitePanel padding="16px 22px">
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}>
+            <div style={{ minWidth: 0, flex: '1 1 240px' }}>
+              <BetaEyebrow dot color={T.text.faint}>
+                Nächster Auftrag · {String(queueIdx + 1).padStart(2, '0')}
+              </BetaEyebrow>
+              <div style={{
+                marginTop: 4,
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}>
+                <span
+                  title={String(fba || '')}
+                  style={{
+                    fontFamily: T.font.mono,
+                    fontSize: 'clamp(18px, 1.9vw, 22px)',
+                    fontWeight: 600,
+                    color: T.text.primary,
+                    letterSpacing: '-0.018em',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    maxWidth: 320,
+                  }}
+                >
+                  {fba}
+                </span>
+                {isError ? (
+                  <BetaStatusPill tone="danger">Parse-Fehler</BetaStatusPill>
+                ) : validErrors > 0 ? (
+                  <BetaStatusPill tone="danger">{validErrors} Fehler</BetaStatusPill>
+                ) : validWarns > 0 ? (
+                  <BetaStatusPill tone="warn">{validWarns} Warn</BetaStatusPill>
+                ) : null}
+              </div>
+              <div style={{
+                marginTop: 4,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+                fontSize: 12,
+                color: T.text.subtle,
+                fontVariantNumeric: 'tabular-nums',
+              }}>
+                <span>{entry._palletCount} Pal</span>
+                <BetaMetaDot />
+                <span>{entry._articleCount} Art</span>
+                <BetaMetaDot />
+                <span>{(entry._units || 0).toLocaleString('de-DE')} EH</span>
+                {!isError && entry._etaSec != null && (
+                  <>
+                    <BetaMetaDot />
+                    <span style={{ color: T.accent.text, fontWeight: 600 }}>
+                      ≈ {fmtDuration(entry._etaSec)}
+                    </span>
+                  </>
+                )}
+                {fp && (
+                  <>
+                    <span style={{ width: 8 }} />
+                    <BetaLDistBar lvlCounts={fp.lvlCounts} />
+                  </>
+                )}
+              </div>
+            </div>
+
+            <span style={{ flex: 1 }} />
+
+            {/* Actions */}
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              <BetaRowAction onClick={onUp || (() => {})} disabled={!onUp} title="Nach oben (⌘↑)">
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                  <path d="M3 9l4-4 4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </BetaRowAction>
+              <BetaRowAction onClick={onDown || (() => {})} disabled={!onDown} title="Nach unten (⌘↓)">
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                  <path d="M3 5l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </BetaRowAction>
+              <BetaRowAction onClick={() => onRemove()} title="Entfernen (x)">
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                  <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </BetaRowAction>
+              <span style={{ width: 4 }} />
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onPreview(); }}
+                disabled={isError}
+                style={{
+                  all: 'unset',
+                  cursor: isError ? 'not-allowed' : 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
+                  padding: '8px 14px',
+                  borderRadius: 999,
+                  background: BETA_PAPER_BG,
+                  color: isError ? T.text.faint : T.text.secondary,
+                  fontFamily: T.font.ui,
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" strokeWidth="1.5">
+                  <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" />
+                  <circle cx="8" cy="8" r="2" />
+                </svg>
+                Vorschau
+              </button>
+            </div>
+          </div>
+        </BetaWhitePanel>
+      </BetaPaperCard>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   NEXT card — dominant head-of-queue treatment.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaNextCard({
+  entry, queueIdx, isSelected, hasCurrent,
+  onSelect, onStart, onRemove, onPreview, onUp, onDown,
+  onDragStart, onDragOver, onDrop, onDragEnd,
+  isDragging, isDropAbove, isDropBelow,
+}) {
+  const fba = entry.parsed?.meta?.sendungsnummer
+    || entry.parsed?.meta?.fbaCode
+    || entry.fileName;
+  const fileName = entry.fileName;
+  const isError = entry.status === 'error';
+  const validErrors = entry.validation?.errorCount || 0;
+  const validWarns  = entry.validation?.warningCount || 0;
+  const fp = entry._fp;
+  const startEnabled = !hasCurrent && !isError;
+  const startTitle = isError
+    ? 'Auftrag mit Parse-Fehler kann nicht gestartet werden.'
+    : hasCurrent
+    ? 'Aktiver Auftrag noch nicht abgeschlossen.'
+    : 'Diesen Auftrag starten — ⏎';
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      onClick={onSelect}
+      style={{
+        position: 'relative',
+        opacity: isDragging ? 0.4 : 1,
+        cursor: 'pointer',
+      }}
+    >
+      {isDropAbove && <BetaDropLine position="above" />}
+      {isDropBelow && <BetaDropLine position="below" />}
+
+      <BetaPaperCard glow>
+        <BetaWhitePanel padding="28px 32px 26px">
+          {/* eyebrow + actions row */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            marginBottom: 14,
+            flexWrap: 'wrap',
+          }}>
+            <BetaEyebrow dot color={T.accent.text}>
+              Nächster Auftrag · {String(queueIdx + 1).padStart(2, '0')}
+            </BetaEyebrow>
+            {isError ? (
+              <BetaStatusPill tone="danger">Parse-Fehler</BetaStatusPill>
+            ) : validErrors > 0 ? (
+              <BetaStatusPill tone="danger">{validErrors} Fehler</BetaStatusPill>
+            ) : validWarns > 0 ? (
+              <BetaStatusPill tone="warn">{validWarns} Warnungen</BetaStatusPill>
+            ) : (
+              <BetaStatusPill tone="success">Validiert</BetaStatusPill>
+            )}
+            {isSelected && (
+              <span style={{
+                fontFamily: T.font.mono,
+                fontSize: 10,
+                fontWeight: 700,
+                color: T.text.faint,
+                textTransform: 'uppercase',
+                letterSpacing: '0.14em',
+              }}>
+                · Auswahl
+              </span>
+            )}
+            <span style={{ flex: 1 }} />
+            <BetaRowAction onClick={(e) => { e.stopPropagation(); onUp?.(); }} disabled={!onUp} title="Nach oben (⌘↑)">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                <path d="M3 9l4-4 4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </BetaRowAction>
+            <BetaRowAction onClick={(e) => { e.stopPropagation(); onDown?.(); }} disabled={!onDown} title="Nach unten (⌘↓)">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                <path d="M3 5l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </BetaRowAction>
+            <BetaRowAction onClick={(e) => { e.stopPropagation(); onRemove(); }} title="Entfernen (x)">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </BetaRowAction>
+          </div>
+
+          {/* big mono FBA */}
+          <BetaBigCopy value={fba} rawValue={String(fba || '')} />
+
+          {/* meta line — filename + relative time + ETA */}
+          <div style={{
+            marginTop: 6,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+            fontSize: 12.5,
+            color: T.text.subtle,
+            fontVariantNumeric: 'tabular-nums',
+          }}>
+            <span title={fileName} style={{
+              maxWidth: 360,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {fileName}
+            </span>
+            {entry.addedAt && (
+              <>
+                <BetaMetaDot />
+                <span>{fmtRel(entry.addedAt)}</span>
+              </>
+            )}
+            {!isError && entry._etaSec != null && (
+              <>
+                <BetaMetaDot />
+                <span style={{ color: T.accent.text, fontWeight: 600 }}>
+                  ≈ {fmtDuration(entry._etaSec)}
+                </span>
+              </>
+            )}
+          </div>
+
+          {/* hairline */}
+          <div style={{
+            height: 1,
+            background: 'rgba(15,23,42,0.08)',
+            margin: '20px 0 16px',
+          }} />
+
+          {/* totals + level distribution */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 24,
+            flexWrap: 'wrap',
+          }}>
+            <BetaStat value={entry._palletCount} label="Paletten" />
+            <BetaStat value={entry._articleCount.toLocaleString('de-DE')} label="Artikel" />
+            <BetaStat value={(entry._units || 0).toLocaleString('de-DE')} label="Einheiten" />
+            <span style={{ flex: 1 }} />
+            {fp && <BetaLDistBar lvlCounts={fp.lvlCounts} />}
+          </div>
+
+          {/* hairline */}
+          <div style={{
+            height: 1,
+            background: 'rgba(15,23,42,0.08)',
+            margin: '20px 0 18px',
+          }} />
+
+          {/* CTAs */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onStart(); }}
+              disabled={!startEnabled}
+              title={startTitle}
+              style={{
+                all: 'unset',
+                cursor: startEnabled ? 'pointer' : 'not-allowed',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '12px 22px',
+                borderRadius: 999,
+                background: startEnabled ? T.accent.main : 'rgba(15,23,42,0.08)',
+                color: startEnabled ? '#FFFFFF' : T.text.faint,
+                fontFamily: T.font.ui,
+                fontSize: 13.5,
+                fontWeight: 600,
+                letterSpacing: '-0.005em',
+                boxShadow: startEnabled ? '0 8px 22px rgba(255,91,31,0.28)' : 'none',
+                transition: 'transform 160ms ease, box-shadow 160ms ease',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M3 2.5l6 3.5-6 3.5z" fill="currentColor" />
+              </svg>
+              {startEnabled ? 'Starten' : (isError ? 'Nicht startbar' : 'Wartet')}
+              {startEnabled && <BetaKbd>⏎</BetaKbd>}
+            </button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onPreview(); }}
+              disabled={isError}
+              style={{
+                all: 'unset',
+                cursor: isError ? 'not-allowed' : 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 7,
+                padding: '11px 18px',
+                borderRadius: 999,
+                background: BETA_PAPER_BG,
+                color: isError ? T.text.faint : T.text.secondary,
+                fontFamily: T.font.ui,
+                fontSize: 12.5,
+                fontWeight: 600,
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+                   stroke="currentColor" strokeWidth="1.5">
+                <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" />
+                <circle cx="8" cy="8" r="2" />
+              </svg>
+              Vorschau
+            </button>
+          </div>
+        </BetaWhitePanel>
+      </BetaPaperCard>
+    </div>
+  );
+}
+
+function BetaStat({ value, label }: { value: React.ReactNode; label: React.ReactNode }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6 }}>
+      <span style={{
+        fontSize: 18,
+        fontWeight: 600,
+        color: T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        letterSpacing: '-0.012em',
+      }}>
+        {value}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 10.5,
+        color: T.text.faint,
+        textTransform: 'uppercase',
+        letterSpacing: '0.10em',
+        fontWeight: 600,
+      }}>
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function BetaStatusPill({ tone, children }: { tone: 'success' | 'warn' | 'danger' | 'accent'; children?: React.ReactNode }) {
+  const palette = tone === 'success'
+    ? { bg: T.status.success.bg, color: T.status.success.text }
+    : tone === 'warn'
+    ? { bg: T.status.warn.bg, color: T.status.warn.text }
+    : tone === 'danger'
+    ? { bg: T.status.danger.bg, color: T.status.danger.text }
+    : { bg: T.accent.bg, color: T.accent.text };
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '4px 10px',
+      borderRadius: 999,
+      background: palette.bg,
+      color: palette.color,
+      fontFamily: T.font.mono,
+      fontSize: 10.5,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.10em',
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function BetaRowAction({ onClick, disabled, title, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      style={{
+        all: 'unset',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        width: 30, height: 30,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 999,
+        background: 'transparent',
+        color: disabled ? 'rgba(15,23,42,0.18)' : T.text.subtle,
+        transition: 'background 160ms ease, color 160ms ease',
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = BETA_PAPER_BG;
+        e.currentTarget.style.color = T.text.primary;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+        e.currentTarget.style.color = disabled ? 'rgba(15,23,42,0.18)' : T.text.subtle;
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function BetaLDistBar({ lvlCounts }: { lvlCounts?: Record<string, number> }) {
+  if (!lvlCounts) return null;
+  const lvls = [1, 2, 3, 4, 5, 6];
+  const total = lvls.reduce((s, k) => s + (lvlCounts[k] || 0), 0);
+  if (!total) return null;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      height: 10,
+      padding: 2,
+      background: BETA_PAPER_BG,
+      borderRadius: 6,
+    }}>
+      {lvls.map((l) => {
+        const c = lvlCounts[l] || 0;
+        if (!c) return null;
+        const meta = LEVEL_META[l];
+        const pct = (c / total) * 100;
+        return (
+          <span
+            key={l}
+            title={`L${l} ${meta?.name || ''} · ${c}`}
+            style={{
+              display: 'inline-block',
+              height: 6,
+              width: Math.max(8, pct * 1.4),
+              borderRadius: 2,
+              background: meta?.color || T.text.faint,
+            }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+function BetaDropLine({ position }: { position: 'above' | 'below' }) {
+  return (
+    <div style={{
+      position: 'absolute',
+      left: 8, right: 8,
+      [position === 'above' ? 'top' : 'bottom']: -5,
+      height: 2,
+      background: T.accent.main,
+      borderRadius: 1,
+      pointerEvents: 'none',
+    } as React.CSSProperties} />
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Secondary queue rows — compact, hairline-bordered, hover-reveal actions.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaQueueRow({
+  entry, queueIdx, isSelected, hasCurrent, isFirst, isLast,
+  onSelect, onStart, onRemove, onPreview, onUp, onDown,
+  onDragStart, onDragOver, onDrop, onDragEnd,
+  isDragging, isDropAbove, isDropBelow,
+}) {
+  const fba = entry.parsed?.meta?.sendungsnummer
+    || entry.parsed?.meta?.fbaCode
+    || entry.fileName;
+  const isError = entry.status === 'error';
+  const validWarns  = entry.validation?.warningCount || 0;
+  const validErrors = entry.validation?.errorCount || 0;
+  const fp = entry._fp;
+
+  return (
+    <li
+      className="mb-q-row"
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      onClick={onSelect}
+      style={{
+        position: 'relative',
+        display: 'grid',
+        gridTemplateColumns: 'auto 36px 1fr auto auto',
+        alignItems: 'center',
+        gap: 14,
+        padding: '14px 16px',
+        cursor: 'pointer',
+        borderRadius: BETA_INNER_RADIUS - 6,
+        background: isSelected ? BETA_PAPER_BG : 'transparent',
+        borderBottom: isLast ? 'none' : '1px solid rgba(15,23,42,0.06)',
+        opacity: isDragging ? 0.4 : 1,
+        transition: 'background 160ms ease',
+      }}
+    >
+      {isDropAbove && <BetaDropLine position="above" />}
+      {isDropBelow && <BetaDropLine position="below" />}
+
+      {/* drag handle */}
+      <span
+        title="Ziehen zum Verschieben"
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{
+          width: 16, height: 24,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: T.text.faint,
+          cursor: 'grab',
+          flexShrink: 0,
+          opacity: 0.5,
+        }}
+      >
+        <svg width="9" height="13" viewBox="0 0 10 14" fill="currentColor">
+          <circle cx="2" cy="2"  r="1.1" />
+          <circle cx="8" cy="2"  r="1.1" />
+          <circle cx="2" cy="7"  r="1.1" />
+          <circle cx="8" cy="7"  r="1.1" />
+          <circle cx="2" cy="12" r="1.1" />
+          <circle cx="8" cy="12" r="1.1" />
+        </svg>
+      </span>
+
+      {/* position */}
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 12,
+        fontWeight: 500,
+        color: T.text.faint,
+        fontVariantNumeric: 'tabular-nums',
+        textAlign: 'right',
+      }}>
+        {String(queueIdx + 1).padStart(2, '0')}
+      </span>
+
+      {/* main: FBA + filename */}
+      <div style={{ minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+        <span
+          className="mb-q-row-fba"
+          title={String(fba || '')}
+          style={{
+            fontFamily: T.font.mono,
+            fontSize: 14.5,
+            fontWeight: 500,
+            color: isError ? T.status.danger.text : T.text.secondary,
+            letterSpacing: '-0.01em',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            maxWidth: 260,
+            transition: 'color 160ms ease',
+          }}
+        >
+          {fba}
+        </span>
+        <span style={{
+          fontSize: 11.5,
+          color: T.text.faint,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          maxWidth: 240,
+        }} title={entry.fileName}>
+          {entry.fileName}
+        </span>
+        {isError && (
+          <BetaStatusPill tone="danger">Parse-Fehler</BetaStatusPill>
+        )}
+        {!isError && validErrors > 0 && (
+          <BetaStatusPill tone="danger">{validErrors} Fehler</BetaStatusPill>
+        )}
+        {!isError && validErrors === 0 && validWarns > 0 && (
+          <BetaStatusPill tone="warn">{validWarns} Warn</BetaStatusPill>
+        )}
+      </div>
+
+      {/* signals: pallet count + level distribution + ETA */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        fontSize: 12,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 12,
+          fontWeight: 600,
+          color: T.text.secondary,
+        }}>
+          {entry._palletCount} Pal
+        </span>
+        {fp && <BetaLDistBar lvlCounts={fp.lvlCounts} />}
+        {!isError && entry._etaSec != null && (
+          <span style={{ minWidth: 50, textAlign: 'right' }}>
+            ≈ {fmtDuration(entry._etaSec)}
+          </span>
+        )}
+      </div>
+
+      {/* hover-reveal actions */}
+      <div
+        className="mb-q-row-actions"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 2,
+          opacity: isSelected ? 1 : 0,
+          transition: 'opacity 160ms ease',
+        }}
+      >
+        <BetaRowAction onClick={onUp || (() => {})} disabled={!onUp} title="Nach oben (⌘↑)">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <path d="M3 9l4-4 4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </BetaRowAction>
+        <BetaRowAction onClick={onDown || (() => {})} disabled={!onDown} title="Nach unten (⌘↓)">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <path d="M3 5l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </BetaRowAction>
+        <BetaRowAction onClick={() => onPreview()} disabled={isError} title="Vorschau anzeigen">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" strokeWidth="1.4">
+            <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" />
+            <circle cx="8" cy="8" r="2" />
+          </svg>
+        </BetaRowAction>
+        <BetaRowAction onClick={onRemove} title="Entfernen (x)">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </BetaRowAction>
+      </div>
+    </li>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Empty state — paper-island dropzone.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaQueueEmpty({ over, busy, onPick, onDragOver, onDragLeave, onDrop }) {
+  return (
+    <BetaPaperCard glow>
+      <BetaWhitePanel padding="56px 36px">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={onPick}
+          onKeyDown={(e) => { if (e.key === 'Enter') onPick(); }}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          style={{
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 18,
+            padding: '28px 24px',
+            borderRadius: BETA_INNER_RADIUS - 6,
+            background: over ? T.accent.bg : BETA_PAPER_BG,
+            boxShadow: over ? 'inset 0 0 0 2px var(--accent)' : 'inset 0 0 0 1px rgba(15,23,42,0.05)',
+            transition: 'background 220ms ease, box-shadow 220ms ease',
+          }}
+        >
+          <span style={{
+            width: 64, height: 64,
+            borderRadius: 999,
+            background: '#FFFFFF',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: over ? T.accent.text : T.text.subtle,
+            boxShadow: '0 4px 16px rgba(15,23,42,0.06)',
+          }}>
+            {busy ? (
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none"
+                   style={{ animation: 'mb-q-spin 800ms linear infinite' }}>
+                <circle cx="11" cy="11" r="8" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+                <path d="M19 11a8 8 0 0 0-8-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none"
+                   stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 16V4M6 9l5-5 5 5M4 18h14" />
+              </svg>
+            )}
+          </span>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{
+              fontFamily: T.font.ui,
+              fontSize: 22,
+              fontWeight: 600,
+              color: T.text.primary,
+              letterSpacing: '-0.018em',
+              marginBottom: 6,
+            }}>
+              {busy ? 'Wird verarbeitet…' : (over ? 'Loslassen — Datei hinzufügen' : 'Warteschlange ist leer')}
+            </div>
+            <div style={{
+              fontSize: 13.5,
+              color: T.text.subtle,
+              lineHeight: 1.5,
+              maxWidth: 380,
+              margin: '0 auto',
+            }}>
+              Lagerauftrag (.docx) hierher ziehen oder Datei wählen — danach
+              läuft der Workflow Schritt für Schritt.
+            </div>
+          </div>
+          <span style={{
+            padding: '10px 18px',
+            borderRadius: 999,
+            background: T.text.primary,
+            color: '#FFFFFF',
+            fontFamily: T.font.ui,
+            fontSize: 13,
+            fontWeight: 600,
+          }}>
+            Datei wählen
+          </span>
+        </div>
+      </BetaWhitePanel>
+    </BetaPaperCard>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Side drawer — slide-in preview. Reuses the same TanStack key as
+   classic PalletPreviewPanel so the cache is shared.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaPreviewDrawer({ entry, onClose }) {
+  const detailQ = useQuery({
+    queryKey: ['auftrag', entry.id],
+    queryFn: () => getAuftrag(entry.id),
+    staleTime: Infinity,
+    refetchInterval: false,
+    enabled: !entry.parsed?.pallets,
+    initialData: entry.parsed?.pallets ? (entry as unknown as Awaited<ReturnType<typeof getAuftrag>>) : undefined,
+  });
+
+  const parsed = (detailQ.data?.parsed ?? entry.parsed) as
+    | { pallets?: PreviewPallet[]; einzelneSkuItems?: unknown[]; meta?: Record<string, unknown> }
+    | null
+    | undefined;
+  const pallets = parsed?.pallets || [];
+  const einzelneSkuItems = (parsed?.einzelneSkuItems as unknown[]) || [];
+  const sortedPallets = useMemo(
+    () => (pallets.length ? (sortPallets(pallets) as PreviewPallet[]) : []),
+    [pallets],
+  );
+  const totalUnits = sortedPallets.reduce(
+    (s, p) => s + (p.items || []).reduce((u, it) => u + (Number(it.units) || 0), 0),
+    0,
+  );
+  const totalItems = sortedPallets.reduce((s, p) => s + (p.items?.length || 0), 0);
+  const fba = entry.parsed?.meta?.sendungsnummer
+    || entry.parsed?.meta?.fbaCode
+    || entry.fileName;
+
+  return (
+    <>
+      <div
+        className="mb-q-backdrop"
+        onClick={onClose}
+        aria-hidden
+        style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(15,23,42,0.32)',
+          backdropFilter: 'blur(6px)',
+          WebkitBackdropFilter: 'blur(6px)',
+          zIndex: 1100,
+          animation: 'mb-q-backdrop-in 200ms ease-out',
+        }}
+      />
+      <div
+        className="mb-q-drawer"
+        role="dialog"
+        aria-label="Auftrag-Vorschau"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: BETA_DRAWER_WIDTH,
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 64px)',
+          padding: 8,
+          background: BETA_PAPER_BG,
+          border: `2px solid ${BETA_PAPER_RIM}`,
+          borderRadius: BETA_PAPER_RADIUS,
+          boxShadow: '0 0 0 0.5px rgba(255,91,31,0.10), 0 32px 96px rgba(15,23,42,0.28), 0 0 89.7px rgba(0,0,0,0.05)',
+          zIndex: 1110,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          animation: 'mb-q-drawer-in 280ms cubic-bezier(0.16,1,0.3,1)',
+        }}
+      >
+        {/* header — own white panel */}
+        <div style={{
+          background: '#FFFFFF',
+          borderRadius: BETA_INNER_RADIUS,
+          padding: '20px 24px 18px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 14,
+          flexShrink: 0,
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <BetaEyebrow dot color={T.accent.text}>Vorschau</BetaEyebrow>
+            <div style={{
+              marginTop: 8,
+              fontFamily: T.font.mono,
+              fontSize: 'clamp(22px, 2.4vw, 30px)',
+              fontWeight: 600,
+              color: T.text.primary,
+              letterSpacing: '-0.022em',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }} title={String(fba || '')}>
+              {fba}
+            </div>
+            <div style={{
+              marginTop: 8,
+              fontSize: 12.5,
+              color: T.text.subtle,
+              fontVariantNumeric: 'tabular-nums',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}>
+              <span>{sortedPallets.length} Paletten</span>
+              <BetaMetaDot />
+              <span>{totalItems} Positionen</span>
+              <BetaMetaDot />
+              <span>{totalUnits.toLocaleString('de-DE')} Einheiten</span>
+              {einzelneSkuItems.length > 0 && (
+                <>
+                  <BetaMetaDot />
+                  <span style={{ color: T.accent.text, fontWeight: 600 }}>
+                    {einzelneSkuItems.length} ESKU
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Schließen"
+            title="Schließen (Esc)"
+            style={{
+              all: 'unset',
+              cursor: 'pointer',
+              width: 36, height: 36,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 999,
+              background: BETA_PAPER_BG,
+              color: T.text.subtle,
+              flexShrink: 0,
+              transition: 'background 160ms ease, color 160ms ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = T.text.primary;
+              e.currentTarget.style.color = '#FFFFFF';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = BETA_PAPER_BG;
+              e.currentTarget.style.color = T.text.subtle;
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        {/* body — scrollable white panel */}
+        <div style={{
+          background: '#FFFFFF',
+          borderRadius: BETA_INNER_RADIUS,
+          flex: 1,
+          minHeight: 0,
+          overflowY: 'auto',
+          padding: '16px 18px 22px',
+        }}>
+          {detailQ.isPending && !parsed ? (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '20px 8px',
+              color: T.text.subtle,
+              fontSize: 13,
+            }}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+                   style={{ animation: 'mb-q-spin 800ms linear infinite' }}>
+                <circle cx="7" cy="7" r="5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.6" />
+                <path d="M12 7a5 5 0 0 0-5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+              Vorschau wird geladen…
+            </div>
+          ) : detailQ.isError && !parsed ? (
+            <div style={{ padding: '20px 8px', color: T.status.danger.text, fontSize: 13 }}>
+              Vorschau konnte nicht geladen werden.
+            </div>
+          ) : !sortedPallets.length ? (
+            <div style={{ padding: '20px 8px', color: T.text.subtle, fontSize: 13 }}>
+              Keine Paletten in diesem Auftrag.
+            </div>
+          ) : (
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {sortedPallets.map((p, idx) => (
+                <BetaDrawerPalletBlock key={p.id || idx} pallet={p} index={idx} />
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function BetaDrawerPalletBlock({ pallet, index }: { pallet: PreviewPallet; index: number }) {
+  const items = pallet.items || [];
+  const eskuOnPallet = (pallet as { einzelneSkuItems?: unknown[] }).einzelneSkuItems?.length || 0;
+  const totalUnits = items.reduce((s, it) => s + (Number(it.units) || 0), 0);
+  const lvl = (pallet as { level?: number }).level;
+  const meta = lvl != null ? LEVEL_META[lvl] : null;
+
+  return (
+    <li style={{
+      background: BETA_PAPER_BG,
+      borderRadius: 18,
+      padding: '14px 16px',
+    }}>
+        {/* header */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          marginBottom: items.length ? 10 : 0,
+          flexWrap: 'wrap',
+        }}>
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 11,
+            fontWeight: 700,
+            color: T.text.faint,
+            letterSpacing: '0.04em',
+          }}>
+            {String(index + 1).padStart(2, '0')}
+          </span>
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 13,
+            fontWeight: 600,
+            color: T.text.primary,
+            letterSpacing: '-0.01em',
+          }}>
+            {pallet.id || `P${index + 1}`}
+          </span>
+          {meta && (
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 10,
+              fontWeight: 700,
+              padding: '2px 7px',
+              background: meta.bg,
+              color: meta.text,
+              borderRadius: 999,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+            }}>
+              L{lvl} {meta.shortName || meta.name}
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 11,
+            color: T.text.faint,
+            fontVariantNumeric: 'tabular-nums',
+          }}>
+            {items.length} Pos · {totalUnits.toLocaleString('de-DE')} Stk
+          </span>
+          {pallet.hasFourSideWarning && (
+            <BetaStatusPill tone="warn">4-Seiten</BetaStatusPill>
+          )}
+          {eskuOnPallet > 0 && (
+            <BetaStatusPill tone="accent">ESKU {eskuOnPallet}</BetaStatusPill>
+          )}
+        </div>
+
+        {/* items */}
+        {items.length > 0 && (
+          <ol style={{
+            listStyle: 'none',
+            margin: 0,
+            padding: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+          }}>
+            {items.map((it, j) => (
+              <BetaDrawerItem key={j} item={it} pos={j + 1} />
+            ))}
+          </ol>
+        )}
+    </li>
+  );
+}
+
+function BetaDrawerItem({ item, pos }: { item: PreviewItem; pos: number }) {
+  const lvl = getDisplayLevel(item) || (item as { level?: number }).level || 1;
+  const meta = LEVEL_META[lvl] || LEVEL_META[1];
+  const code = (item as { code?: string }).code || item.fnsku || item.sku || (item as { useItem?: string }).useItem || '';
+  return (
+    <li style={{
+      display: 'grid',
+      gridTemplateColumns: '22px 22px 1fr auto',
+      alignItems: 'center',
+      gap: 8,
+      padding: '5px 6px',
+      borderRadius: 8,
+      fontSize: 12,
+    }}>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 10.5,
+        color: T.text.faint,
+        textAlign: 'right',
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {String(pos).padStart(2, '0')}
+      </span>
+      <span
+        title={`L${lvl} ${meta.name}`}
+        style={{
+          width: 14, height: 14,
+          borderRadius: 4,
+          background: meta.color,
+          opacity: 0.85,
+          alignSelf: 'center',
+        }}
+      />
+      <span
+        title={item.title || ''}
+        style={{
+          color: T.text.primary,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          letterSpacing: '-0.005em',
+        }}
+      >
+        {formatItemTitle(item.title || '—')}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 11,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+        textAlign: 'right',
+      }}>
+        {item.units != null ? `× ${item.units}` : '—'}
+        {code && (
+          <span style={{ color: T.text.faint, marginLeft: 8 }}>{String(code).slice(-8)}</span>
+        )}
+      </span>
+    </li>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Keyboard hints — paper-island bottom strip.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaKbdHints() {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 18,
+      padding: '14px 16px',
+      marginTop: 10,
+      flexWrap: 'wrap',
+    }}>
+      <BetaKbdHint kbd={<><BetaKbd>j</BetaKbd><BetaKbd>k</BetaKbd></>}>Navigieren</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>⏎</BetaKbd>}>Starten</BetaKbdHint>
+      <BetaKbdHint kbd={<><BetaKbd>⌘</BetaKbd><BetaKbd>↑↓</BetaKbd></>}>Verschieben</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>x</BetaKbd>}>Entfernen</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>/</BetaKbd>}>Suchen</BetaKbdHint>
+    </div>
+  );
+}
+
+function BetaKbdHint({ kbd, children }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      fontFamily: T.font.mono,
+      fontSize: 11,
+      color: T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.10em',
+    }}>
+      <span style={{ display: 'inline-flex', gap: 3 }}>{kbd}</span>
       {children}
     </span>
   );

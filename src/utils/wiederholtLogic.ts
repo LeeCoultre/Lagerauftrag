@@ -3,8 +3,15 @@
 
    SHOW    if useItem code appears on the NEXT pallet AND that occurrence
            has quantity ≥ 30
-   DON'T   if next article (in flow) is the same code (continuous)
-   DON'T   if not in next pallet but appears later (only across one pallet)
+   DON'T   if NEXT article in the SAME pallet has same code (continuous
+           within one pallet — the worker just keeps scanning)
+
+   Cross-pallet repeats are NOT suppressed. When two consecutive pallets
+   hold the same article (especially single-article 4-Seiten-Warnung
+   pallets that look visually identical), the worker often takes the
+   first pallet back by mistake after finishing it. Wiederholt is the
+   warning that prevents that confusion — even if it's "continuous", the
+   pallet boundary is real and the worker needs to see it.
    ───────────────────────────────────────────────────────────────────────── */
 
 const QTY_THRESHOLD = 30;
@@ -17,13 +24,11 @@ export function detectWiederholt(pallets, palletIdx, itemIdx) {
   const code = item.useItem || item.fnsku;
   if (!code) return null;
 
-  // Suppression: next article in flow has same code
+  // Suppression: next article WITHIN the same pallet has same code
+  // (worker just keeps scanning — no need to surface an overlay).
   const nextInPallet = pallet.items?.[itemIdx + 1];
-  if (nextInPallet) {
-    if ((nextInPallet.useItem || nextInPallet.fnsku) === code) return null;
-  } else {
-    const firstNext = pallets?.[palletIdx + 1]?.items?.[0];
-    if (firstNext && (firstNext.useItem || firstNext.fnsku) === code) return null;
+  if (nextInPallet && (nextInPallet.useItem || nextInPallet.fnsku) === code) {
+    return null;
   }
 
   // Look at NEXT pallet for hit with qty > 30

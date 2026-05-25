@@ -121,19 +121,20 @@ export default function FocusScreen() {
 
   const rawPallets = useMemo(
     () => enrichedSourcePallets.map((p) => {
-      const sortedMixed = sortItemsForPallet(p.items || []);
-      /* Large-base ESKU goes to the START of the pallet, before Mixed.
-         Within that group there is a strict sub-order driven by
-         largeBaseRank():
-           rank 2  →  80mm × *           (placed FIRST, heaviest base)
-           rank 1  →  57mm × 63m / 58×64 (placed AFTER 80mm)
-           rank 0  →  not a base format  (continues to land after Mixed)
-         This mirrors the warehouse stacking sequence physically. */
+      /* Large-base ESKU goes to the START of the pallet:
+           rank 2  →  80×80 only          (FIRST, heaviest flat base)
+           rank 1  →  57×63m / 58×64     (after 80×80, before Mixed)
+           rank 0  →  not a base format  (MERGED with Mixed and
+                                          re-sorted by level — so an L1
+                                          ESKU 80×63 lands in the L1
+                                          group with Mixed L1 instead of
+                                          being dumped after L5+) */
       const eskuRaw     = distribution.byPalletId[p.id] || [];
       const base80      = sortItemsForPallet(eskuRaw.filter((x) => largeBaseRank(x) === 2));
       const baseOther   = sortItemsForPallet(eskuRaw.filter((x) => largeBaseRank(x) === 1));
-      const restEsku    = sortItemsForPallet(eskuRaw.filter((x) => largeBaseRank(x) === 0));
-      return { ...p, items: [...base80, ...baseOther, ...sortedMixed, ...restEsku] };
+      const restEsku    = eskuRaw.filter((x) => largeBaseRank(x) === 0);
+      const combined    = sortItemsForPallet([...(p.items || []), ...restEsku]);
+      return { ...p, items: [...base80, ...baseOther, ...combined] };
     }),
     [enrichedSourcePallets, distribution],
   );
@@ -735,12 +736,9 @@ export default function FocusScreen() {
       rawPallets, allPalletCopied, setCurrentPalletIdx, setCurrentItemIdx,
       setInterlude, buildInterludePayload]);
 
-  /* Wiederholt auto-dismiss */
-  useEffect(() => {
-    if (!wiederholt) return undefined;
-    const t = setTimeout(() => setWiederholt(null), 5000);
-    return () => clearTimeout(t);
-  }, [wiederholt]);
+  /* Wiederholt: no auto-dismiss. Worker must explicitly click "OK" so
+     the warning can't disappear before being acknowledged (the whole
+     point is to prevent confusing two identical-looking pallets). */
 
   /* All-done detection — fires ONLY when finalePending was armed by
      handleFertig on the last item. Re-mounting Focus (e.g. via "Focus"
@@ -783,10 +781,17 @@ export default function FocusScreen() {
       if (t?.isContentEditable) return;
       if (interlude || finale) return;
       if (wiederholt) {
-        if (['Escape', 'Enter', ' '].includes(e.key)) {
+        /* While wiederholt is open: Space dismisses (mirrors the OK
+           button — workers already hit Space for "Fertig", so this
+           is the natural acknowledge gesture). All other keys are
+           swallowed so the underlying workflow shortcuts don't fire
+           through the overlay. */
+        if (e.key === ' ') {
           e.preventDefault();
           setWiederholt(null);
+          return;
         }
+        e.preventDefault();
         return;
       }
       /* UI-mode toggles (Z/D/S) — always available, regardless of
@@ -1632,14 +1637,17 @@ function DoppelStrip({ show, nextItem, currentItem, currentCat }: any) {
     ? (nextItem.isEsku ? nextItem.eskuCartons : nextItem.units)
     : null;
   /* Mirror ArticleColumn's perCarton rule: Mixed → "N Rollen" per
-     Karton (or whatever rollenUnit says), ESKU → "N Einheiten" per
-     Karton. Hidden when the parser couldn't extract it. */
+     Karton, ESKU → "Y Label × N total" (e.g. "1 Dose × 42" — Y from
+     ACHTUNG inner-pack, N = item.units total across all FBA cartons).
+     Falls back to "X Einheiten" when the parser only knows X. */
   const perCarton = nextItem
     ? (!nextItem.isEsku
         ? (nextItem.rollen ? { value: nextItem.rollen, unit: nextItem.rollenUnit || 'Rollen' } : null)
-        : (nextItem.eskuPacksPerCarton != null
-            ? { value: nextItem.eskuPacksPerCarton, unit: 'Einheiten' }
-            : null))
+        : (nextItem.eskuItemsPerPack != null && nextItem.units
+            ? { value: nextItem.eskuItemsPerPack, unit: nextItem.eskuContentLabel || 'Einheiten', multiplier: nextItem.units }
+            : nextItem.eskuPacksPerCarton != null
+                ? { value: nextItem.eskuPacksPerCarton, unit: 'Einheiten' }
+                : null))
     : null;
   /* Volume comparison: how much bigger/smaller is the NEXT article
      vs the CURRENT one. Renders two stacked mini-bars normalized to
@@ -1729,6 +1737,9 @@ function DoppelStrip({ show, nextItem, currentItem, currentCat }: any) {
               }}>
                 {perCarton.unit}
               </span>
+              {perCarton.multiplier != null && (
+                <span style={{ marginLeft: 6 }}>× {perCarton.multiplier}</span>
+              )}
             </span>
           )}
         </span>
@@ -1987,10 +1998,38 @@ function LevelChip({ level, cat }) {
 /* Compact, warehouse-friendly title for the hero card. Drops the
    descriptor trailer that follows a " - " (with surrounding spaces) and
    anything after the first ", ". Hyphens inside compound nouns
-   (e.g. "Thermo-Rolle") are preserved because they have no spaces. */
+   (e.g. "Thermo-Rolle") are preserved because they have no spaces.
+
+   Product-specific overrides come first — for Kürbiskernöl the raw
+   title "HE - Steirisches Gourmet Kürbiskernöl - Kernöl g.g.A. … (1 l)"
+   collapsed to just "HE" under the generic rule, which told the worker
+   nothing. We now extract "Kürbiskernöl <size> l" directly.
+
+   Generic flow also strips a short ALL-CAPS brand prefix (≤3 chars +
+   " - ") so titles like "HE - …" or "TK - …" surface the real product
+   instead of the brand code. */
 function simplifyItemTitle(name) {
   if (!name) return '';
-  let out = String(name);
+  const raw = String(name);
+  // Kürbiskernöl: "Kürbiskernöl <N> l". Size hint can be parenthesised
+  // ("(1 l)") in raw title OR a bare suffix ("1 L") if formatItemTitle
+  // already normalised it upstream — match both.
+  if (/kürbiskernöl|kürbis.*kern[öo]l/i.test(raw)) {
+    const m = raw.match(/(\d+(?:[.,]\d+)?)\s*l\b/i);
+    return m ? `Kürbiskernöl ${m[1].replace(',', '.')} l` : 'Kürbiskernöl';
+  }
+  // Klebeband / Packband: strip "TK THERMALKING" brand, keep first two
+  // descriptor chunks ("Klebeband - Packband") and preserve the warning
+  // hint ("(Bruchgefahr)" / "(Fragile)" / etc.) so the worker still sees it.
+  if (/klebeband|packband|paketband/i.test(raw)) {
+    const warn = raw.match(/\(([^)]+)\)/);
+    const warnSuffix = warn ? ` (${warn[1].trim()})` : '';
+    const stripped = raw.replace(/^TK\s+THERMALKING\s+/i, '').replace(/\s*\([^)]+\)/g, '').trim();
+    const parts = stripped.split(/\s+-\s+/).map((p) => p.trim()).filter(Boolean);
+    const core = parts.slice(0, 2).join(' - ');
+    return (core || stripped) + warnSuffix;
+  }
+  let out = raw.replace(/^[A-ZÄÖÜ]{2,3}\s+[—–-]\s+/, '');
   const dash = out.match(/^(.+?)\s+[—–-]\s+/);
   if (dash) out = dash[1];
   const ci = out.indexOf(', ');
@@ -2002,9 +2041,11 @@ function simplifyItemTitle(name) {
 function ArticleColumn({ item, zen = false }) {
   const perCarton = !item.isEsku
     ? (item.rollen ? { value: item.rollen, unit: item.rollenUnit || 'Rollen' } : null)
-    : (item.eskuPacksPerCarton != null
-        ? { value: item.eskuPacksPerCarton, unit: 'Einheiten' }
-        : null);
+    : (item.eskuItemsPerPack != null && item.units
+        ? { value: item.eskuItemsPerPack, unit: item.eskuContentLabel || 'Einheiten', multiplier: item.units }
+        : item.eskuPacksPerCarton != null
+            ? { value: item.eskuPacksPerCarton, unit: 'Einheiten' }
+            : null);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
@@ -2036,7 +2077,7 @@ function ArticleColumn({ item, zen = false }) {
           lineHeight: 1.05,
           fontVariantNumeric: 'tabular-nums',
         }}>
-          {perCarton.value} {perCarton.unit}
+          {perCarton.value} {perCarton.unit}{perCarton.multiplier != null ? ` × ${perCarton.multiplier}` : ''}
         </div>
       )}
 
@@ -3134,7 +3175,7 @@ function FlowCompactRow({
       title={item?.name || title}
       style={{
         display: 'grid',
-        gridTemplateColumns: '1fr 160px 14px',
+        gridTemplateColumns: '1fr auto 160px 14px',
         alignItems: 'center',
         gap: 14,
         width: '68%',
@@ -3168,6 +3209,39 @@ function FlowCompactRow({
         transition: 'color 200ms ease',
       }}>
         {title}
+      </span>
+
+      {/* Quantity — cartons for ESKU, units for Mixed. Mono so digits
+          align across stacked rows. Hover lifts it via the [data-fcr=num]
+          handlers already wired in onEnter/onLeave. */}
+      <span
+        data-fcr="num"
+        title={isEsku
+          ? `${cartons ?? 0} Kartons`
+          : `${cartons ?? 0} Stück`}
+        style={{
+          fontFamily: T.font.mono,
+          fontSize: 13.5,
+          fontWeight: 600,
+          color: restTextColor,
+          fontVariantNumeric: 'tabular-nums',
+          letterSpacing: '-0.005em',
+          whiteSpace: 'nowrap',
+          opacity: cartons != null ? 1 : 0.4,
+          transition: 'color 200ms ease',
+        }}
+      >
+        {cartons != null ? `× ${cartons}` : '—'}
+        <span style={{
+          marginLeft: 4,
+          fontSize: 10.5,
+          fontWeight: 500,
+          color: T.text.faint,
+          letterSpacing: '0.04em',
+          textTransform: 'uppercase',
+        }}>
+          {isEsku ? 'K' : 'S'}
+        </span>
       </span>
 
       {/* Pallet-occupancy mini-bar — sits between title and quantity.
@@ -3254,9 +3328,11 @@ function FlowHero({ item, copied, onCopyCode, onCopyUse, flashUse, reCopyTick = 
   const cartons = isEsku ? (item?.eskuCartons ?? item?.units) : item?.units;
   const perCarton = !isEsku
     ? (item?.rollen ? { value: item.rollen, unit: item.rollenUnit || 'Rollen' } : null)
-    : (item?.eskuPacksPerCarton != null
-        ? { value: item.eskuPacksPerCarton, unit: 'Einheiten' }
-        : null);
+    : (item?.eskuItemsPerPack != null && item?.units
+        ? { value: item.eskuItemsPerPack, unit: item.eskuContentLabel || 'Einheiten', multiplier: item.units }
+        : item?.eskuPacksPerCarton != null
+            ? { value: item.eskuPacksPerCarton, unit: 'Einheiten' }
+            : null);
   const code = item?.code || item?.amazonCode || item?.fnsku || '';
   const title = simplifyItemTitle(item?.name || item?.title || '—');
   const lvl = item?.level || getDisplayLevel(item) || 1;
@@ -3429,14 +3505,14 @@ function FlowHero({ item, copied, onCopyCode, onCopyUse, flashUse, reCopyTick = 
               letterSpacing: '-0.01em',
               fontVariantNumeric: 'tabular-nums',
             }}>
-              {perCarton.value} {perCarton.unit}
+              {perCarton.value} {perCarton.unit}{perCarton.multiplier != null ? ` × ${perCarton.multiplier}` : ''}
             </span>
           )}
           <span style={{
             fontFamily: T.font.ui,
-            fontSize: 'clamp(15px, 1.4vw, 18px)',
-            fontWeight: 500,
-            letterSpacing: '-0.005em',
+            fontSize: 'clamp(17px, 1.7vw, 22px)',
+            fontWeight: 600,
+            letterSpacing: '-0.01em',
             lineHeight: 1.2,
             color: lvlColor,
           }}>
@@ -5641,164 +5717,152 @@ function PalletListOverlay({
 
 function WiederholtOverlay({ hit, onDismiss }) {
   if (!hit) return null;
+  /* Minimalist redesign (2026-05-24): the worker has already seen the
+     Artikel-Code on the hero card — repeating it here is noise. The
+     one new fact this overlay carries is the TARGET PALETTE-ID; units
+     is supporting context to set expectation. Everything else is
+     chrome.
+     Dismissal: ONLY via the explicit "OK" button. No backdrop click,
+     no Esc/Enter/Space, no timeout — worker must acknowledge so the
+     warning can't be missed when two identical pallets follow. */
   return (
-    <div onClick={onDismiss} style={{
+    <div style={{
       position: 'fixed',
       inset: 0,
-      background: 'rgba(17, 24, 39, 0.32)',
+      background: 'rgba(15, 23, 42, 0.32)',
+      backdropFilter: 'blur(4px)',
+      WebkitBackdropFilter: 'blur(4px)',
       zIndex: 1000,
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
       padding: 32,
-      cursor: 'pointer',
       animation: 'wiederholt-bg-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both',
     }}>
       <div
-        onClick={(e) => e.stopPropagation()}
         style={{
-          maxWidth: 560,
+          maxWidth: 520,
           width: '100%',
-          background: T.bg.surface,
-          border: `1px solid ${T.border.primary}`,
-          borderRadius: 18,
-          boxShadow: 'none',
-          padding: '28px 32px 24px',
+          padding: 8,
+          background: '#F4F5F7',
+          border: '2px solid #FFFFFF',
+          borderRadius: 32,
+          boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
           cursor: 'default',
-          animation: 'wiederholt-card-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both',
+          animation: 'wiederholt-card-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both',
         }}
       >
-        <Badge tone="warn">Wiederholung erkannt</Badge>
-
-        <h2 style={{
-          marginTop: 14, marginBottom: 14,
-          fontSize: 20, fontWeight: 500, color: T.text.primary,
-          letterSpacing: '-0.02em',
-        }}>
-          Dieser Artikel kommt erneut vor
-        </h2>
-
-        {/* Target pallet — the single fact the worker needs to remember.
-           Rendered as a high-contrast pill so it survives a quick glance
-           at the overlay without the worker parsing prose around it. */}
         <div style={{
-          display: 'inline-flex',
-          alignItems: 'baseline',
-          gap: 10,
-          padding: '10px 16px',
-          background: T.status.warn.bg,
-          border: `1px solid ${T.status.warn.border}`,
-          borderRadius: 12,
+          background: '#FFFFFF',
+          borderRadius: 24,
+          padding: '40px 36px 28px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 14,
         }}>
+          {/* Eyebrow: state label only — code + units now live as a
+              dedicated row under the pallet ID hero. */}
           <span style={{
-            fontSize: 10.5,
-            fontWeight: 600,
             fontFamily: T.font.mono,
+            fontSize: 10.5,
+            fontWeight: 700,
             color: T.status.warn.text,
             textTransform: 'uppercase',
-            letterSpacing: '0.14em',
+            letterSpacing: '0.18em',
           }}>
-            auf Palette
+            Wiederholt
           </span>
+
+          {/* Hero — the one fact that matters: the next pallet ID. */}
           <span style={{
             fontFamily: T.font.mono,
-            fontSize: 'clamp(22px, 2.6vw, 30px)',
-            fontWeight: 700,
+            fontSize: 'clamp(56px, 8vw, 88px)',
+            fontWeight: 600,
             color: T.status.warn.main,
-            letterSpacing: '-0.01em',
+            letterSpacing: '-0.04em',
             lineHeight: 1,
             fontVariantNumeric: 'tabular-nums',
           }}>
             {hit.palletId}
           </span>
-        </div>
 
-        {/* Hero — code (mono, large) + units (numeric, accent) so the
-            worker spots both at a glance without parsing prose. */}
-        <div style={{
-          marginTop: 22,
-          padding: '20px 22px',
-          background: T.bg.surface2,
-          border: `1px solid ${T.border.subtle}`,
-          borderRadius: 12,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 18,
-          flexWrap: 'wrap',
-        }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
-            <span style={{
-              fontSize: 10.5,
-              fontWeight: 600,
-              fontFamily: T.font.mono,
-              color: T.text.faint,
-              textTransform: 'uppercase',
-              letterSpacing: '0.14em',
-            }}>
-              Artikel-Code
-            </span>
-            <span style={{
-              fontFamily: T.font.mono,
-              fontSize: 'clamp(24px, 3vw, 32px)',
-              fontWeight: 500,
-              color: T.text.primary,
-              letterSpacing: '-0.022em',
-              lineHeight: 1,
-              wordBreak: 'break-all',
-            }}>
-              {hit.code}
-            </span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
-            <span style={{
-              fontSize: 10.5,
-              fontWeight: 600,
-              fontFamily: T.font.mono,
-              color: T.text.faint,
-              textTransform: 'uppercase',
-              letterSpacing: '0.14em',
-            }}>
-              Menge
-            </span>
-            <span style={{
+          {/* Article code + quantity row — sits under the pallet ID so
+              the worker can cross-check the scanner code without going
+              back to the hero card. Code is mono (matches scanner ID),
+              quantity accents the warn-tone so it reads as paired. */}
+          {(hit.code || hit.units != null) && (
+            <div style={{
+              marginTop: 6,
               display: 'inline-flex',
               alignItems: 'baseline',
-              gap: 6,
-              fontFamily: T.font.mono,
-              fontVariantNumeric: 'tabular-nums',
-              lineHeight: 1,
+              gap: 12,
+              flexWrap: 'wrap',
+              justifyContent: 'center',
             }}>
-              <span style={{
-                fontSize: 'clamp(28px, 3.6vw, 40px)',
-                fontWeight: 600,
-                color: T.status.warn.main,
-                letterSpacing: '-0.025em',
-              }}>
-                {hit.units}
-              </span>
-              <span style={{
-                fontSize: 13,
-                fontWeight: 500,
-                color: T.text.subtle,
-                textTransform: 'uppercase',
-                letterSpacing: '0.10em',
-              }}>
-                Stück
-              </span>
-            </span>
-          </div>
-        </div>
+              {hit.code && (
+                <span style={{
+                  fontFamily: T.font.mono,
+                  fontSize: 'clamp(16px, 1.8vw, 22px)',
+                  fontWeight: 500,
+                  color: T.text.primary,
+                  letterSpacing: '-0.01em',
+                  fontVariantNumeric: 'tabular-nums',
+                  wordBreak: 'break-all',
+                }}>
+                  {hit.code}
+                </span>
+              )}
+              {hit.units != null && (
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'baseline',
+                  gap: 5,
+                  fontFamily: T.font.mono,
+                  fontVariantNumeric: 'tabular-nums',
+                }}>
+                  <span style={{
+                    fontSize: 'clamp(18px, 2vw, 24px)',
+                    fontWeight: 600,
+                    color: T.status.warn.main,
+                    letterSpacing: '-0.01em',
+                  }}>
+                    {hit.units}
+                  </span>
+                  <span style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: T.text.subtle,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.12em',
+                  }}>
+                    Stück
+                  </span>
+                </span>
+              )}
+            </div>
+          )}
 
-        <div style={{
-          marginTop: 22,
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12,
-        }}>
-          <span style={{ fontSize: 11.5, color: T.text.subtle,
-                         fontFamily: T.font.mono, letterSpacing: '0.04em' }}>
-            <Kbd>Esc</Kbd> zum Schließen
-          </span>
-          <Button variant="primary" size="sm" onClick={onDismiss}>Verstanden</Button>
+          {/* Single dismiss action — pill style consistent with beta UI. */}
+          <button
+            type="button"
+            onClick={onDismiss}
+            style={{
+              all: 'unset',
+              cursor: 'pointer',
+              marginTop: 18,
+              padding: '11px 28px',
+              background: T.accent.main,
+              color: '#FFFFFF',
+              borderRadius: 999,
+              fontFamily: T.font.ui,
+              fontSize: 13,
+              fontWeight: 600,
+              letterSpacing: '0.01em',
+            }}
+          >
+            OK
+          </button>
         </div>
       </div>
 
@@ -5808,8 +5872,8 @@ function WiederholtOverlay({ hit, onDismiss }) {
           to   { opacity: 1; }
         }
         @keyframes wiederholt-card-in {
-          from { opacity: 0; transform: translateY(10px); }
-          to   { opacity: 1; transform: translateY(0); }
+          from { opacity: 0; transform: translateY(12px) scale(0.98); }
+          to   { opacity: 1; transform: translateY(0) scale(1); }
         }
       `}</style>
     </div>

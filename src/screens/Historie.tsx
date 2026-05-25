@@ -31,6 +31,7 @@ import {
   Page, Topbar, Card, Eyebrow, Lead, EmptyState, Button, Badge, T,
 } from '@/components/ui.jsx';
 import { LEVEL_META, getDisplayLevel } from '@/utils/auftragHelpers.js';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 const RANGE_PRESETS = [
   { id: 'today', label: 'Heute' },
@@ -49,8 +50,19 @@ const SORT_OPTIONS = [
 
 const TREND_DAYS = 14;
 
-/* ════════════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════════════
+   Top-level router — branches on the global beta-design flag. Classic body
+   below is byte-identical to the pre-beta archive; beta body lives at the
+   end of the file (see BetaHistorie).
+   ════════════════════════════════════════════════════════════════════════ */
 export default function HistorieScreen() {
+  const { beta } = useBetaDesign();
+  if (beta) return <BetaHistorie />;
+  return <ClassicHistorie />;
+}
+
+/* ════════════════════════════════════════════════════════════════════════ */
+function ClassicHistorie() {
   const { history, removeHistoryEntry, clearHistory } = useAppState();
 
   const [openId, setOpenId]       = useState(null);
@@ -1843,6 +1855,2085 @@ function Kbd({ children }) {
       borderRadius: 3,
       lineHeight: 1,
     }}>
+      {children}
+    </span>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   ═══════════════════════ BETA — paper-island redesign ═══════════════════
+   Visual language mirrors BetaWarteschlange / BetaPruefen: paper-island
+   #F4F5F7 cards with halo + 2px white rim, Outfit font (via [data-beta=1]
+   in index.css), big mono numbers, hairline dividers between rows.
+   Details open in a centered modal drawer (no inline expand bloat).
+   Toolbar (search + range + sort + export + clear) lives in a fixed
+   bottom-floating dock.
+   ════════════════════════════════════════════════════════════════════════ */
+
+const BH_PAPER_BG     = '#F4F5F7';
+const BH_PAPER_RIM    = '#FFFFFF';
+const BH_PAPER_RADIUS = 32;
+const BH_INNER_RADIUS = 24;
+const BH_DRAWER_WIDTH = 760;
+
+/* ──────────────────────────────────────────────────────────────────────── */
+function BetaHistorie() {
+  const { history, removeHistoryEntry, clearHistory } = useAppState();
+
+  const [drawerEntryId, setDrawerEntryId] = useState<string | null>(null);
+  const [search, setSearch]               = useState('');
+  const [range, setRange]                 = useState('all');
+  const [sort, setSort]                   = useState('newest');
+  const [userFilter, setUserFilter]       = useState<string | null>(null);
+  const [selectedIdx, setSelectedIdx]     = useState(0);
+  const [exporting, setExporting]         = useState(false);
+
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  /* enrichment — same shape as classic */
+  const enriched = useMemo(
+    () => history.map((h) => {
+      const dur = h.durationSec ?? 0;
+      const minPerPallet  = h.palletCount  > 0 && dur > 0 ? dur / h.palletCount  / 60 : null;
+      const minPerArticle = h.articleCount > 0 && dur > 0 ? dur / h.articleCount / 60 : null;
+      const ehPerMin      = dur > 0
+        ? (sumUnitsFromTimings(h) ?? estimateUnitsFromArticles(h.articleCount)) / (dur / 60)
+        : null;
+      return { ...h, _minPerPallet: minPerPallet, _minPerArticle: minPerArticle, _ehPerMin: ehPerMin };
+    }),
+    [history],
+  );
+
+  const stats = useMemo(() => {
+    if (!enriched.length) return { medianDur: 0, medianMinPerPallet: 0, medianMinPerArticle: 0 };
+    return {
+      medianDur:           median(enriched.map((e) => e.durationSec).filter(Boolean)),
+      medianMinPerPallet:  median(enriched.map((e) => e._minPerPallet).filter((v) => v != null)),
+      medianMinPerArticle: median(enriched.map((e) => e._minPerArticle).filter((v) => v != null)),
+    };
+  }, [enriched]);
+
+  const records = useMemo(() => computeRecords(enriched), [enriched]);
+
+  const userBreakdown = useMemo(() => {
+    const m = new Map();
+    for (const e of enriched) {
+      const u = e.assignedToUserName || '—';
+      m.set(u, (m.get(u) || 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+  }, [enriched]);
+
+  const rangeStart = useMemo(() => {
+    const now = new Date();
+    if (range === 'today') { const d = new Date(now); d.setHours(0, 0, 0, 0); return d.getTime(); }
+    if (range === 'week')  { const d = new Date(now); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 7); return d.getTime(); }
+    if (range === 'month') { const d = new Date(now); d.setHours(0, 0, 0, 0); d.setMonth(d.getMonth() - 1); return d.getTime(); }
+    return null;
+  }, [range]);
+
+  const visible = useMemo(() => {
+    let arr = enriched;
+    if (rangeStart != null) arr = arr.filter((e) => (e.finishedAt || 0) >= rangeStart);
+    if (userFilter) arr = arr.filter((e) => (e.assignedToUserName || '—') === userFilter);
+    const q = search.trim().toLowerCase();
+    if (q) {
+      arr = arr.filter((e) => {
+        return (e.fbaCode || '').toLowerCase().includes(q)
+            || (e.fileName || '').toLowerCase().includes(q);
+      });
+    }
+    return sortEntries(arr, sort);
+  }, [enriched, rangeStart, userFilter, search, sort]);
+
+  const trend = useMemo(() => buildTrend(enriched, TREND_DAYS), [enriched]);
+
+  useEffect(() => {
+    if (selectedIdx >= visible.length) setSelectedIdx(Math.max(0, visible.length - 1));
+  }, [visible.length, selectedIdx]);
+
+  /* close drawer if the entry leaves visible scope */
+  useEffect(() => {
+    if (drawerEntryId && !enriched.some((e) => e.id === drawerEntryId)) {
+      setDrawerEntryId(null);
+    }
+  }, [enriched, drawerEntryId]);
+
+  /* body scroll lock while drawer open */
+  useEffect(() => {
+    if (!drawerEntryId) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [drawerEntryId]);
+
+  const onExport = useCallback(async () => {
+    try {
+      setExporting(true);
+      const params: { from?: string } = {};
+      if (rangeStart) params.from = new Date(rangeStart).toISOString().slice(0, 10);
+      await downloadAuftraegeXlsx(params);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'unbekannter Fehler';
+      alert('Export fehlgeschlagen: ' + msg);
+    } finally {
+      setExporting(false);
+    }
+  }, [rangeStart]);
+
+  /* keyboard cockpit — Esc closes drawer first */
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = e.target.tagName;
+      const inField = tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable;
+      if (e.key === '/' && !inField) {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (drawerEntryId) { setDrawerEntryId(null); return; }
+        if (document.activeElement === searchRef.current) {
+          searchRef.current?.blur();
+          if (search) setSearch('');
+          return;
+        }
+      }
+      if (inField) return;
+      if (e.key === 'e' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        if (!exporting) onExport();
+        return;
+      }
+      if (!visible.length) return;
+      if (e.key === 'j' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.min(visible.length - 1, i + 1));
+      } else if (e.key === 'k' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.max(0, i - 1));
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const target = visible[selectedIdx];
+        if (target) setDrawerEntryId(target.id);
+      } else if (e.key === 'x' || e.key === 'Delete') {
+        e.preventDefault();
+        const target = visible[selectedIdx];
+        if (target && window.confirm(`Eintrag ${target.fbaCode || target.fileName} löschen?`)) {
+          removeHistoryEntry(target.id);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [visible, selectedIdx, search, exporting, drawerEntryId, onExport, removeHistoryEntry]);
+
+  const hasAny = enriched.length > 0;
+  const noResults = hasAny && visible.length === 0;
+  const drawerEntry = useMemo(
+    () => (drawerEntryId ? enriched.find((e) => e.id === drawerEntryId) || null : null),
+    [enriched, drawerEntryId],
+  );
+
+  return (
+    <Page>
+      <BetaHistorieStyles />
+
+      <main style={{
+        maxWidth: 1080,
+        margin: '0 auto',
+        padding: '32px 32px 180px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        fontFamily: T.font.ui,
+      }}>
+        {!hasAny ? (
+          <BetaHistorieEmpty />
+        ) : (
+          <>
+            {/* HERO — Records + Trend in one paper-island */}
+            <BetaPaperCard>
+              {records.fastest && (
+                <BetaWhitePanel padding="28px 32px">
+                  <BetaEyebrow dot color={T.accent.text}>Persönliche Rekorde</BetaEyebrow>
+                  <div style={{
+                    marginTop: 16,
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(3, 1fr)',
+                    gap: 14,
+                  }}>
+                    <BetaRecordCard
+                      icon="🥇"
+                      label="Schnellster Auftrag"
+                      value={fmtDurationShort(records.fastest.durationSec)}
+                      entryFba={records.fastest.fbaCode || records.fastest.fileName}
+                      sub={`${records.fastest.palletCount} Paletten · ${records.fastest.articleCount} Artikel`}
+                      onClick={() => setDrawerEntryId(records.fastest!.id)}
+                    />
+                    {records.bestPerPallet && (
+                      <BetaRecordCard
+                        icon="⚡"
+                        label="Beste Min/Palette"
+                        value={`${records.bestPerPallet._minPerPallet.toFixed(1)} min`}
+                        entryFba={records.bestPerPallet.fbaCode || records.bestPerPallet.fileName}
+                        sub={`${records.bestPerPallet.palletCount} Paletten gesamt`}
+                        onClick={() => setDrawerEntryId(records.bestPerPallet!.id)}
+                      />
+                    )}
+                    {records.bestPerArticle && (
+                      <BetaRecordCard
+                        icon="📈"
+                        label="Beste Min/Artikel"
+                        value={`${records.bestPerArticle._minPerArticle.toFixed(2)} min`}
+                        entryFba={records.bestPerArticle.fbaCode || records.bestPerArticle.fileName}
+                        sub={`${records.bestPerArticle.articleCount} Artikel gesamt`}
+                        onClick={() => setDrawerEntryId(records.bestPerArticle!.id)}
+                      />
+                    )}
+                  </div>
+                </BetaWhitePanel>
+              )}
+              <BetaWhitePanel padding="20px 32px 22px">
+                <BetaTrendStrip trend={trend} />
+              </BetaWhitePanel>
+            </BetaPaperCard>
+
+            {/* SECTION EYEBROW */}
+            <div style={{ paddingLeft: 4, marginTop: 6 }}>
+              <BetaEyebrow>
+                Aufträge · {visible.length} sichtbar von {enriched.length} gesamt
+              </BetaEyebrow>
+            </div>
+
+            {/* LIST */}
+            {noResults ? (
+              <BetaPaperCard>
+                <BetaWhitePanel padding="36px 32px">
+                  <div style={{ textAlign: 'center', color: T.text.subtle, fontSize: 13.5 }}>
+                    Keine Aufträge passen zu Suche oder Filter.
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: 14 }}>
+                    <button
+                      type="button"
+                      onClick={() => { setSearch(''); setRange('all'); setUserFilter(null); }}
+                      style={{
+                        all: 'unset',
+                        cursor: 'pointer',
+                        padding: '8px 16px',
+                        borderRadius: 999,
+                        background: BH_PAPER_BG,
+                        fontFamily: T.font.ui,
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        color: T.text.secondary,
+                      }}
+                    >
+                      Filter zurücksetzen
+                    </button>
+                  </div>
+                </BetaWhitePanel>
+              </BetaPaperCard>
+            ) : (
+              <BetaPaperCard>
+                <BetaWhitePanel padding="6px 8px">
+                  <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                    {visible.map((entry, idx) => (
+                      <BetaHistorieRow
+                        key={entry.id}
+                        entry={entry}
+                        idx={idx}
+                        isSelected={idx === selectedIdx}
+                        isLast={idx === visible.length - 1}
+                        showUser={userBreakdown.length > 1}
+                        medianDur={stats.medianDur}
+                        onSelect={() => setSelectedIdx(idx)}
+                        onOpen={() => { setSelectedIdx(idx); setDrawerEntryId(entry.id); }}
+                        onRemove={() => {
+                          if (window.confirm(`Eintrag ${entry.fbaCode || entry.fileName} löschen?`)) {
+                            removeHistoryEntry(entry.id);
+                          }
+                        }}
+                      />
+                    ))}
+                  </ul>
+                </BetaWhitePanel>
+              </BetaPaperCard>
+            )}
+
+            <BetaHistorieKbdHints />
+          </>
+        )}
+      </main>
+
+      {/* BOTTOM DOCK */}
+      {hasAny && (
+        <BetaHistorieDock
+          entryCount={enriched.length}
+          visibleCount={visible.length}
+          search={search}
+          onSearch={setSearch}
+          searchRef={searchRef}
+          range={range}
+          onRange={setRange}
+          sort={sort}
+          onSort={setSort}
+          userFilter={userFilter}
+          onUserFilter={setUserFilter}
+          userBreakdown={userBreakdown}
+          onExport={onExport}
+          exporting={exporting}
+          onClear={clearHistory}
+        />
+      )}
+
+      {/* DRAWER */}
+      {drawerEntry && (
+        <BetaHistorieDrawer
+          entry={drawerEntry}
+          onClose={() => setDrawerEntryId(null)}
+        />
+      )}
+    </Page>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Beta atoms — local clones of the Warteschlange atoms.
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaHistorieStyles() {
+  return (
+    <style>{`
+      @keyframes mb-h-rise {
+        0%   { opacity: 0; transform: translateY(8px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes mb-h-drawer-in {
+        0%   { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
+        100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      }
+      @keyframes mb-h-backdrop-in {
+        0%   { opacity: 0; }
+        100% { opacity: 1; }
+      }
+      @keyframes mb-h-spin {
+        to { transform: rotate(360deg); }
+      }
+      @keyframes mb-h-menu-in {
+        0%   { opacity: 0; transform: translateY(6px) scale(0.97); }
+        100% { opacity: 1; transform: translateY(0)   scale(1);    }
+      }
+      @media (max-width: 900px) {
+        .mb-h-drawer { width: calc(100vw - 24px) !important; max-height: calc(100vh - 24px) !important; }
+        .mb-h-backdrop { background: rgba(15,23,42,0.42) !important; }
+      }
+      .mb-h-row:hover .mb-h-row-actions { opacity: 1; }
+      .mb-h-row:hover .mb-h-row-fba    { color: ${T.text.primary}; }
+    `}</style>
+  );
+}
+
+function BetaPaperCard({ children, glow = false, padding = 8 }: { children?: React.ReactNode; glow?: boolean; padding?: number }) {
+  return (
+    <div style={{
+      padding,
+      background: BH_PAPER_BG,
+      border: `2px solid ${BH_PAPER_RIM}`,
+      borderRadius: BH_PAPER_RADIUS,
+      boxShadow: glow
+        ? '0 0 0 0.5px rgba(255,91,31,0.18), 0 16px 48px rgba(255,91,31,0.10), 0 0 89.7px rgba(0,0,0,0.05)'
+        : '0 0 89.7px rgba(0,0,0,0.05)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaWhitePanel({ children, padding }: { children?: React.ReactNode; padding?: string }) {
+  return (
+    <div style={{
+      background: '#FFFFFF',
+      borderRadius: BH_INNER_RADIUS,
+      padding: padding || '22px 26px',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function BetaEyebrow({ children, color, dot }: { children?: React.ReactNode; color?: string; dot?: boolean }) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      fontSize: 10.5,
+      fontWeight: 700,
+      fontFamily: T.font.mono,
+      color: color || T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.18em',
+    }}>
+      {dot && (
+        <span style={{
+          width: 7, height: 7,
+          borderRadius: '50%',
+          background: color || T.accent.main,
+        }} />
+      )}
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function BetaMetaDot() {
+  return (
+    <span aria-hidden style={{
+      width: 3, height: 3, borderRadius: '50%',
+      background: 'rgba(15, 23, 42, 0.22)',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function BetaKbd({ children, dim = false }: { children?: React.ReactNode; dim?: boolean }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 22, height: 20,
+      padding: '0 7px',
+      fontSize: 10.5,
+      fontFamily: T.font.mono,
+      fontWeight: 700,
+      color: dim ? T.text.faint : T.text.secondary,
+      background: dim ? 'transparent' : BH_PAPER_BG,
+      borderRadius: 6,
+      lineHeight: 1,
+      letterSpacing: '0.04em',
+    }}>{children}</span>
+  );
+}
+
+function BetaStatusPill({ tone, children }: { tone: 'success' | 'warn' | 'danger' | 'accent'; children?: React.ReactNode }) {
+  const palette = tone === 'success'
+    ? { bg: T.status.success.bg, color: T.status.success.text }
+    : tone === 'warn'
+    ? { bg: T.status.warn.bg, color: T.status.warn.text }
+    : tone === 'danger'
+    ? { bg: T.status.danger.bg, color: T.status.danger.text }
+    : { bg: T.accent.bg, color: T.accent.text };
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '3px 9px',
+      borderRadius: 999,
+      background: palette.bg,
+      color: palette.color,
+      fontFamily: T.font.mono,
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.10em',
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function BetaRowAction({ onClick, disabled, title, children }: any) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      style={{
+        all: 'unset',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        width: 28, height: 28,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 999,
+        background: 'transparent',
+        color: disabled ? 'rgba(15,23,42,0.18)' : T.text.subtle,
+        transition: 'background 160ms ease, color 160ms ease',
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = BH_PAPER_BG;
+        e.currentTarget.style.color = T.text.primary;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+        e.currentTarget.style.color = disabled ? 'rgba(15,23,42,0.18)' : T.text.subtle;
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Records hero
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaRecordCard({ icon, label, value, entryFba, sub, onClick }: {
+  icon: React.ReactNode; label: React.ReactNode; value: React.ReactNode;
+  entryFba?: string | null; sub?: string | null;
+  onClick?: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: '18px 20px',
+        background: hover ? '#FFFFFF' : BH_PAPER_BG,
+        borderRadius: 18,
+        boxShadow: hover
+          ? '0 8px 28px rgba(15,23,42,0.10)'
+          : 'inset 0 0 0 1px rgba(15,23,42,0.04)',
+        transform: hover ? 'translateY(-1px)' : 'translateY(0)',
+        transition: 'background 200ms ease, box-shadow 200ms ease, transform 200ms cubic-bezier(0.16,1,0.3,1)',
+      }}
+    >
+      <div style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 10.5,
+        fontFamily: T.font.mono,
+        fontWeight: 700,
+        color: T.text.subtle,
+        textTransform: 'uppercase',
+        letterSpacing: '0.14em',
+      }}>
+        <span style={{ fontSize: 14 }} aria-hidden>{icon}</span>
+        <span>{label}</span>
+      </div>
+      <div style={{
+        fontFamily: T.font.ui,
+        fontSize: 'clamp(24px, 2.6vw, 32px)',
+        fontWeight: 600,
+        letterSpacing: '-0.025em',
+        color: T.text.primary,
+        fontVariantNumeric: 'tabular-nums',
+        lineHeight: 1.05,
+      }}>
+        {value}
+      </div>
+      {entryFba && (
+        <div style={{
+          fontFamily: T.font.mono,
+          fontSize: 12,
+          color: T.text.muted,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {entryFba}
+        </div>
+      )}
+      {sub && (
+        <div style={{ fontSize: 11.5, color: T.text.faint }}>
+          {sub}
+        </div>
+      )}
+    </button>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   14-day trend strip
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaTrendStrip({ trend }: { trend: Array<TrendBucket & { avgSec: number }> }) {
+  const max = Math.max(1, ...trend.map((b) => b.count));
+  const totalCount = trend.reduce((s, b) => s + b.count, 0);
+  const totalSec   = trend.reduce((s, b) => s + b.totalSec, 0);
+  const avgSec     = totalCount ? Math.round(totalSec / totalCount) : 0;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <BetaEyebrow>14-Tage Trend</BetaEyebrow>
+          <span style={{ fontSize: 12, color: T.text.faint }}>
+            Aufträge pro Tag · ø {avgSec ? fmtDurationLong(avgSec) : '—'} Dauer
+          </span>
+        </div>
+        <span style={{
+          fontSize: 12,
+          color: T.text.subtle,
+          fontVariantNumeric: 'tabular-nums',
+          fontFamily: T.font.mono,
+        }}>
+          {totalCount} Aufträge gesamt
+        </span>
+      </div>
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${trend.length}, 1fr)`,
+        gap: 6,
+        height: 72,
+        alignItems: 'end',
+      }}>
+        {trend.map((b) => (
+          <BetaTrendBar key={b.ms} bucket={b} max={max} />
+        ))}
+      </div>
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${trend.length}, 1fr)`,
+        gap: 6,
+        fontSize: 10,
+        fontFamily: T.font.mono,
+        color: T.text.faint,
+        textAlign: 'center',
+        letterSpacing: '0.04em',
+      }}>
+        {trend.map((b, i) => (
+          <span key={b.ms}>{i % 2 === 0 ? b.label : '·'}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BetaTrendBar({ bucket, max }: { bucket: TrendBucket & { avgSec: number }; max: number }) {
+  const [hover, setHover] = useState(false);
+  const h = bucket.count ? Math.max(4, Math.round((bucket.count / max) * 64)) : 3;
+  const isToday = (() => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return bucket.ms === today.getTime();
+  })();
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: 'relative',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'flex-end',
+      }}
+    >
+      <div style={{
+        height: h,
+        borderRadius: 4,
+        background: bucket.count
+          ? (isToday ? T.accent.main : 'var(--accent)')
+          : 'rgba(15,23,42,0.06)',
+        opacity: bucket.count
+          ? (isToday ? 1 : Math.max(0.5, bucket.count / max))
+          : 1,
+        transition: 'opacity 160ms ease, transform 200ms cubic-bezier(0.16,1,0.3,1)',
+        transform: hover ? 'scaleY(1.04)' : 'none',
+        transformOrigin: 'bottom',
+      }} />
+      {hover && bucket.count > 0 && (
+        <div style={{
+          position: 'absolute',
+          bottom: h + 8,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          padding: '6px 10px',
+          fontSize: 11,
+          fontFamily: T.font.mono,
+          color: T.text.primary,
+          background: '#FFFFFF',
+          border: `1px solid rgba(15,23,42,0.08)`,
+          borderRadius: 8,
+          whiteSpace: 'nowrap',
+          boxShadow: '0 8px 22px rgba(15,23,42,0.10)',
+          pointerEvents: 'none',
+          zIndex: 4,
+        }}>
+          <div style={{ fontWeight: 700 }}>
+            {bucket.shortDay}, {bucket.label}
+          </div>
+          <div style={{ marginTop: 3, color: T.text.subtle }}>
+            {bucket.count} {bucket.count === 1 ? 'Auftrag' : 'Aufträge'} · ø {fmtDurationLong(bucket.avgSec)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   List rows
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaHistorieRow({
+  entry, idx, isSelected, isLast, showUser, medianDur,
+  onSelect, onOpen, onRemove,
+}: any) {
+  const fba = entry.fbaCode || entry.fileName;
+  const isCancelled = entry.status === 'cancelled';
+  const palTimings = useMemo(
+    () => (Object.values(entry.palletTimings || {}) as Array<{ startedAt?: number; finishedAt?: number }>)
+      .map((t) => (t.startedAt && t.finishedAt) ? Math.round((t.finishedAt - t.startedAt) / 1000) : null)
+      .filter((v): v is number => v != null),
+    [entry.palletTimings],
+  );
+  const ehPerMin = entry._ehPerMin;
+  const cmpPct = medianDur > 0 && entry.durationSec
+    ? Math.round(((entry.durationSec - medianDur) / medianDur) * 100)
+    : null;
+
+  return (
+    <li
+      className="mb-h-row"
+      onClick={() => { onSelect(); onOpen(); }}
+      style={{
+        position: 'relative',
+        display: 'grid',
+        gridTemplateColumns: 'auto auto 1fr auto auto',
+        alignItems: 'center',
+        gap: 14,
+        padding: '14px 16px',
+        cursor: 'pointer',
+        borderRadius: BH_INNER_RADIUS - 6,
+        background: isSelected ? BH_PAPER_BG : 'transparent',
+        borderBottom: isLast ? 'none' : '1px solid rgba(15,23,42,0.06)',
+        transition: 'background 160ms ease',
+      }}
+    >
+      {/* cancellation hairline */}
+      {isCancelled && (
+        <span aria-hidden style={{
+          position: 'absolute',
+          left: 4, top: 8, bottom: 8,
+          width: 3,
+          borderRadius: 2,
+          background: T.status.danger.main,
+        }} />
+      )}
+
+      {/* position */}
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 12,
+        fontWeight: 500,
+        color: T.text.faint,
+        fontVariantNumeric: 'tabular-nums',
+        textAlign: 'right',
+        minWidth: 22,
+        paddingLeft: isCancelled ? 6 : 0,
+      }}>
+        {String(idx + 1).padStart(2, '0')}
+      </span>
+
+      {/* pallet timings mini-spark */}
+      {palTimings.length > 0
+        ? <BetaPalletTimingsBar timings={palTimings} totalCount={entry.palletCount} />
+        : <span style={{ width: 64, height: 18 }} />}
+
+      {/* main: FBA + filename + badges */}
+      <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
+        }}>
+          <span
+            className="mb-h-row-fba"
+            title={String(fba || '')}
+            style={{
+              fontFamily: T.font.mono,
+              fontSize: 14.5,
+              fontWeight: 500,
+              color: isCancelled ? T.status.danger.text : T.text.secondary,
+              letterSpacing: '-0.01em',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: 260,
+              transition: 'color 160ms ease',
+            }}
+          >
+            {fba}
+          </span>
+          {isCancelled && <BetaStatusPill tone="danger">Storniert</BetaStatusPill>}
+          {showUser && entry.assignedToUserName && (
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 10.5,
+              color: T.text.faint,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              fontWeight: 600,
+            }}>
+              {entry.assignedToUserName}
+            </span>
+          )}
+          {!isCancelled && cmpPct != null && Math.abs(cmpPct) >= 5 && (
+            <BetaStatusPill tone={cmpPct < 0 ? 'success' : 'warn'}>
+              {cmpPct < 0 ? '−' : '+'}{Math.abs(cmpPct)}% Ø
+            </BetaStatusPill>
+          )}
+        </div>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          fontSize: 11.5,
+          color: T.text.faint,
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          <span title={entry.fileName} style={{
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            maxWidth: 220,
+          }}>
+            {entry.fileName}
+          </span>
+          <BetaMetaDot />
+          <span title={fmtTimestamp(entry.finishedAt)}>{fmtRelative(entry.finishedAt)}</span>
+        </div>
+      </div>
+
+      {/* signals */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        fontSize: 12,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+        fontFamily: T.font.mono,
+      }}>
+        <span><span style={{ fontWeight: 600, color: T.text.secondary }}>{entry.palletCount}</span> Pal</span>
+        <span><span style={{ fontWeight: 600, color: T.text.secondary }}>{entry.articleCount}</span> Art</span>
+        <span style={{ color: T.accent.text, fontWeight: 600 }}>
+          {fmtDurationShort(entry.durationSec)}
+        </span>
+        {ehPerMin != null && Number.isFinite(ehPerMin) && (
+          <span>{ehPerMin.toFixed(1)} EH/min</span>
+        )}
+      </div>
+
+      {/* hover-reveal actions */}
+      <div
+        className="mb-h-row-actions"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 2,
+          opacity: isSelected ? 1 : 0,
+          transition: 'opacity 160ms ease',
+        }}
+      >
+        <BetaRowAction onClick={onOpen} title="Details öffnen (⏎)">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" strokeWidth="1.5">
+            <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" />
+            <circle cx="8" cy="8" r="2" />
+          </svg>
+        </BetaRowAction>
+        <BetaRowAction onClick={onRemove} title="Eintrag löschen (x)">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <path d="M2 4h10M5 4V2.5h4V4M3.5 4l.5 8h6l.5-8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </BetaRowAction>
+      </div>
+    </li>
+  );
+}
+
+function BetaPalletTimingsBar({ timings, totalCount }: { timings: number[]; totalCount: number }) {
+  const max = Math.max(...timings, 1);
+  return (
+    <span
+      title={`Palettenzeiten: ${timings.length} von ${totalCount} mit Daten`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'flex-end',
+        height: 18,
+        gap: 1.5,
+        minWidth: 64,
+      }}
+    >
+      {timings.map((t, i) => {
+        const h = Math.max(2, Math.round((t / max) * 16));
+        const isPeak = t === max && timings.length > 1;
+        return (
+          <span
+            key={i}
+            title={`P${i + 1} · ${fmtMmSs(t)}`}
+            style={{
+              width: 4,
+              height: h,
+              background: isPeak ? T.status.warn.main : T.accent.main,
+              opacity: isPeak ? 1 : Math.max(0.45, t / max),
+              borderRadius: 1.5,
+            }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Bottom dock
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaHistorieDock({
+  entryCount, visibleCount,
+  search, onSearch, searchRef,
+  range, onRange, sort, onSort,
+  userFilter, onUserFilter, userBreakdown,
+  onExport, exporting, onClear,
+}: any) {
+  const [openMenu, setOpenMenu] = useState<'range' | 'sort' | 'user' | null>(null);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest('[data-h-dock-menu]')) setOpenMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenu(null);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openMenu]);
+
+  const currentRange = RANGE_PRESETS.find((r) => r.id === range) || RANGE_PRESETS[3];
+  const currentSort  = SORT_OPTIONS.find((s) => s.id === sort)  || SORT_OPTIONS[0];
+
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 18,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      maxWidth: 'calc(100vw - 24px)',
+      zIndex: 60,
+      pointerEvents: 'auto',
+    }}>
+      <BetaPaperCard padding={6}>
+        <BetaWhitePanel padding="6px 8px">
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            flexWrap: 'nowrap',
+          }}>
+            {/* Export */}
+            <button
+              type="button"
+              onClick={onExport}
+              disabled={exporting}
+              title="xlsx-Export der sichtbaren Aufträge (E)"
+              style={{
+                all: 'unset',
+                cursor: exporting ? 'wait' : 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '7px 14px 7px 10px',
+                borderRadius: 999,
+                background: BH_PAPER_BG,
+                color: T.text.secondary,
+                fontFamily: T.font.ui,
+                fontSize: 12.5,
+                fontWeight: 600,
+                opacity: exporting ? 0.6 : 1,
+                transition: 'background 160ms ease, color 160ms ease',
+              }}
+              onMouseEnter={(e) => {
+                if (exporting) return;
+                e.currentTarget.style.background = '#FFFFFF';
+                e.currentTarget.style.color = T.text.primary;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = BH_PAPER_BG;
+                e.currentTarget.style.color = T.text.secondary;
+              }}
+            >
+              <span style={{
+                width: 22, height: 22,
+                borderRadius: 999,
+                background: '#FFFFFF',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: T.text.subtle,
+                flexShrink: 0,
+              }}>
+                {exporting ? (
+                  <svg width="11" height="11" viewBox="0 0 14 14" fill="none"
+                       style={{ animation: 'mb-h-spin 800ms linear infinite' }}>
+                    <circle cx="7" cy="7" r="5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.6" />
+                    <path d="M12 7a5 5 0 0 0-5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none"
+                       stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M6 1.5v7m0 0L3 6m3 2.5L9 6M2 10.5h8" />
+                  </svg>
+                )}
+              </span>
+              <span>{exporting ? 'lädt…' : 'xlsx'}</span>
+            </button>
+
+            <BetaDockSep />
+
+            {/* Search */}
+            <BetaSearchInput
+              value={search}
+              onChange={onSearch}
+              refEl={searchRef}
+              placeholder="FBA / Datei…"
+            />
+
+            <BetaDockSep />
+
+            {/* Range */}
+            <BetaDockMenu
+              data-attr="range"
+              label="Zeitraum"
+              current={currentRange.label}
+              open={openMenu === 'range'}
+              onToggle={() => setOpenMenu((c) => c === 'range' ? null : 'range')}
+              icon={
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+                     stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="10" height="9" rx="1.5" />
+                  <path d="M2 5.5h10M4.5 2v2.5M9.5 2v2.5" />
+                </svg>
+              }
+              options={RANGE_PRESETS.map((m) => ({ id: m.id, label: m.label, active: range === m.id }))}
+              onPick={(id) => { onRange(id); setOpenMenu(null); }}
+            />
+
+            <BetaDockSep />
+
+            {/* Sort */}
+            <BetaDockMenu
+              label="Sortieren"
+              current={currentSort.label}
+              open={openMenu === 'sort'}
+              onToggle={() => setOpenMenu((c) => c === 'sort' ? null : 'sort')}
+              icon={
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+                     stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 4h8M4 7h6M5 10h4" />
+                </svg>
+              }
+              options={SORT_OPTIONS.map((m) => ({ id: m.id, label: m.label, active: sort === m.id }))}
+              onPick={(id) => { onSort(id); setOpenMenu(null); }}
+            />
+
+            {/* User filter — only when >1 operator */}
+            {userBreakdown.length > 1 && (
+              <>
+                <BetaDockSep />
+                <BetaDockMenu
+                  label="Operator"
+                  current={userFilter || 'Alle'}
+                  open={openMenu === 'user'}
+                  onToggle={() => setOpenMenu((c) => c === 'user' ? null : 'user')}
+                  icon={
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
+                         stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="7" cy="5" r="2.4" />
+                      <path d="M2.5 12c.6-2.4 2.5-3.5 4.5-3.5s3.9 1.1 4.5 3.5" />
+                    </svg>
+                  }
+                  options={[
+                    { id: '__all', label: 'Alle', hint: `${entryCount}`, active: !userFilter },
+                    ...userBreakdown.map((u: { name: string; count: number }) => ({
+                      id: u.name, label: u.name, hint: `${u.count}`, active: userFilter === u.name,
+                    })),
+                  ]}
+                  onPick={(id) => {
+                    onUserFilter(id === '__all' ? null : id);
+                    setOpenMenu(null);
+                  }}
+                />
+              </>
+            )}
+
+            {/* Clear all */}
+            {entryCount >= 2 && (
+              <>
+                <BetaDockSep />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm(`${entryCount} Einträge wirklich aus der Historie löschen?\n\nDas wirft nur die UI-Zeilen weg — das Audit-Log bleibt erhalten.`)) {
+                      onClear();
+                    }
+                  }}
+                  title="Alle aus Historie löschen"
+                  style={{
+                    all: 'unset',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 32, height: 32,
+                    borderRadius: 999,
+                    color: T.text.subtle,
+                    transition: 'background 160ms ease, color 160ms ease',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = T.status.danger.bg;
+                    e.currentTarget.style.color = T.status.danger.text;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.color = T.text.subtle;
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                    <path d="M2 4h10M5 4V2.5h4V4M3.5 4l.5 8h6l.5-8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </>
+            )}
+          </div>
+        </BetaWhitePanel>
+      </BetaPaperCard>
+    </div>
+  );
+}
+
+function BetaDockSep() {
+  return (
+    <span aria-hidden style={{
+      width: 1,
+      height: 22,
+      background: 'rgba(15,23,42,0.08)',
+      margin: '0 4px',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function BetaSearchInput({ value, onChange, refEl, placeholder }: any) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '6px 10px',
+      background: BH_PAPER_BG,
+      borderRadius: 999,
+      minWidth: 180,
+      flex: '0 1 220px',
+      maxWidth: 240,
+    }}>
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none"
+           stroke={T.text.faint} strokeWidth="1.6" strokeLinecap="round">
+        <circle cx="6" cy="6" r="4" />
+        <path d="M9 9l3 3" />
+      </svg>
+      <input
+        ref={refEl}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          all: 'unset',
+          flex: 1,
+          fontFamily: T.font.ui,
+          fontSize: 12.5,
+          color: T.text.primary,
+          minWidth: 0,
+        }}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          aria-label="Suche leeren"
+          style={{
+            all: 'unset',
+            cursor: 'pointer',
+            color: T.text.faint,
+            display: 'inline-flex',
+            padding: 2,
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none"
+               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M3 3l6 6M9 3l-6 6" />
+          </svg>
+        </button>
+      )}
+      <BetaKbd dim>/</BetaKbd>
+    </div>
+  );
+}
+
+function BetaDockMenu({
+  label, current, open, onToggle, options, onPick, icon,
+}: {
+  label: string;
+  current: React.ReactNode;
+  open: boolean;
+  onToggle: () => void;
+  options: Array<{ id: string; label: React.ReactNode; hint?: string | null; active?: boolean }>;
+  onPick: (id: string) => void;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div data-h-dock-menu style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={label}
+        style={{
+          all: 'unset',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '7px 12px',
+          borderRadius: 999,
+          background: open ? BH_PAPER_BG : 'transparent',
+          color: open ? T.text.primary : T.text.secondary,
+          fontFamily: T.font.ui,
+          fontSize: 12,
+          fontWeight: 600,
+          letterSpacing: '-0.005em',
+          transition: 'background 160ms ease, color 160ms ease',
+          maxWidth: 180,
+        }}
+        onMouseEnter={(e) => {
+          if (!open) e.currentTarget.style.background = BH_PAPER_BG;
+        }}
+        onMouseLeave={(e) => {
+          if (!open) e.currentTarget.style.background = 'transparent';
+        }}
+      >
+        {icon && <span style={{ display: 'inline-flex', color: T.text.faint }}>{icon}</span>}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {current}
+        </span>
+        <svg
+          width="9" height="9" viewBox="0 0 10 10" fill="none"
+          style={{
+            color: T.text.faint,
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 200ms cubic-bezier(0.16,1,0.3,1)',
+            flexShrink: 0,
+          }}
+        >
+          <path d="M2.5 4l2.5 2.5L7.5 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: 'absolute',
+            bottom: 'calc(100% + 8px)',
+            left: 0,
+            minWidth: 200,
+            padding: 6,
+            background: BH_PAPER_BG,
+            border: `2px solid ${BH_PAPER_RIM}`,
+            borderRadius: 18,
+            boxShadow: '0 16px 48px rgba(15,23,42,0.18), 0 0 89.7px rgba(0,0,0,0.05)',
+            animation: 'mb-h-menu-in 200ms cubic-bezier(0.16,1,0.3,1)',
+          }}
+        >
+          <div style={{
+            background: '#FFFFFF',
+            borderRadius: 12,
+            padding: 4,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+            maxHeight: 280,
+            overflowY: 'auto',
+          }}>
+            {options.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                role="menuitem"
+                onClick={(e) => { e.stopPropagation(); onPick(opt.id); }}
+                style={{
+                  all: 'unset',
+                  cursor: 'pointer',
+                  display: 'grid',
+                  gridTemplateColumns: '14px 1fr auto',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '9px 12px',
+                  borderRadius: 10,
+                  background: opt.active ? T.accent.bg : 'transparent',
+                  color: opt.active ? T.accent.text : T.text.primary,
+                  fontFamily: T.font.ui,
+                  fontSize: 12.5,
+                  fontWeight: opt.active ? 600 : 500,
+                  letterSpacing: '-0.005em',
+                  transition: 'background 140ms ease',
+                }}
+                onMouseEnter={(e) => {
+                  if (!opt.active) e.currentTarget.style.background = BH_PAPER_BG;
+                }}
+                onMouseLeave={(e) => {
+                  if (!opt.active) e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 14, height: 14,
+                  color: opt.active ? T.accent.text : 'transparent',
+                }}>
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                    <path d="M2.5 6.5l2 2 5-5.5" stroke="currentColor" strokeWidth="2"
+                          strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+                <span style={{
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {opt.label}
+                </span>
+                {opt.hint && (
+                  <span style={{
+                    fontFamily: T.font.mono,
+                    fontSize: 10.5,
+                    color: T.text.faint,
+                    fontWeight: 500,
+                    fontVariantNumeric: 'tabular-nums',
+                  }}>
+                    {opt.hint}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Drawer — centered modal with Gantt + articles + cancellation
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaHistorieDrawer({ entry, onClose }: { entry: any; onClose: () => void }) {
+  const detailQ = useQuery({
+    queryKey: ['auftrag', entry.id],
+    queryFn: () => getAuftrag(entry.id),
+    staleTime: Infinity,
+    refetchInterval: false,
+  });
+
+  const fba = entry.fbaCode || entry.fileName;
+  const isCancelled = entry.status === 'cancelled';
+
+  const cancellation = (detailQ.data?.parsed as { cancellation?: {
+    items: Array<{ palletId: string | null; itemIdx: number | null; code: string | null; title: string | null; reason: string | null }>;
+    note: string | null;
+    at: string;
+    by: { id: string; name: string } | null;
+  } } | null | undefined)?.cancellation || null;
+
+  const cancelByKey = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const it of cancellation?.items || []) {
+      if (it.palletId != null && it.itemIdx != null) {
+        m.set(`${it.palletId}|${it.itemIdx}`, it.reason);
+      }
+    }
+    return m;
+  }, [cancellation]);
+
+  const articles = useMemo(() => {
+    const pallets = detailQ.data?.parsed?.pallets || [];
+    return pallets.flatMap((p) =>
+      (p.items || []).map((it, i) => ({
+        palletId: p.id,
+        itemIdx:  i,
+        sku:      it.sku,
+        fnsku:    it.fnsku,
+        title:    it.title,
+        units:    it.units,
+        useItem:  it.useItem,
+        level:    getDisplayLevel(it),
+      })),
+    );
+  }, [detailQ.data]);
+
+  const palletGantt = useMemo(() => {
+    const pallets = detailQ.data?.parsed?.pallets || [];
+    const lookup = new Map(pallets.map((p) => [p.id, p]));
+    const rows: { id: string; level: number; durSec: number; startMs: number; endMs: number }[] = [];
+    for (const [id, t] of Object.entries((entry.palletTimings || {}) as Record<string, { startedAt?: number; finishedAt?: number }>)) {
+      if (!t.startedAt || !t.finishedAt) continue;
+      const p = lookup.get(id);
+      const items = p?.items || [];
+      const lvl = items.length ? primaryLevelOf(items) : 1;
+      rows.push({
+        id,
+        level: lvl,
+        durSec: Math.round((t.finishedAt - t.startedAt) / 1000),
+        startMs: t.startedAt,
+        endMs:   t.finishedAt,
+      });
+    }
+    rows.sort((a, b) => a.startMs - b.startMs);
+    return rows;
+  }, [entry.palletTimings, detailQ.data]);
+
+  const ganttTotal = palletGantt.reduce((s, r) => s + r.durSec, 0);
+  const ehPerMin = entry._ehPerMin;
+
+  return (
+    <>
+      <div
+        className="mb-h-backdrop"
+        onClick={onClose}
+        aria-hidden
+        style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(15,23,42,0.32)',
+          backdropFilter: 'blur(6px)',
+          WebkitBackdropFilter: 'blur(6px)',
+          zIndex: 1100,
+          animation: 'mb-h-backdrop-in 200ms ease-out',
+        }}
+      />
+      <div
+        className="mb-h-drawer"
+        role="dialog"
+        aria-label="Auftrag-Details"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: BH_DRAWER_WIDTH,
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 64px)',
+          padding: 8,
+          background: BH_PAPER_BG,
+          border: `2px solid ${BH_PAPER_RIM}`,
+          borderRadius: BH_PAPER_RADIUS,
+          boxShadow: '0 0 0 0.5px rgba(255,91,31,0.10), 0 32px 96px rgba(15,23,42,0.28), 0 0 89.7px rgba(0,0,0,0.05)',
+          zIndex: 1110,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          animation: 'mb-h-drawer-in 280ms cubic-bezier(0.16,1,0.3,1)',
+        }}
+      >
+        {/* header */}
+        <div style={{
+          background: '#FFFFFF',
+          borderRadius: BH_INNER_RADIUS,
+          padding: '20px 24px 18px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 14,
+          flexShrink: 0,
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <BetaEyebrow dot color={isCancelled ? T.status.danger.text : T.accent.text}>
+              {isCancelled ? 'Storniert' : 'Abgeschlossen'}
+            </BetaEyebrow>
+            <div style={{
+              marginTop: 8,
+              fontFamily: T.font.mono,
+              fontSize: 'clamp(22px, 2.4vw, 30px)',
+              fontWeight: 600,
+              color: T.text.primary,
+              letterSpacing: '-0.022em',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }} title={String(fba || '')}>
+              {fba}
+            </div>
+            <div style={{
+              marginTop: 8,
+              fontSize: 12.5,
+              color: T.text.subtle,
+              fontVariantNumeric: 'tabular-nums',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}>
+              <span title={entry.fileName}>{entry.fileName}</span>
+              <BetaMetaDot />
+              <span title={fmtTimestamp(entry.finishedAt)}>{fmtRelative(entry.finishedAt)}</span>
+              {entry.assignedToUserName && (
+                <>
+                  <BetaMetaDot />
+                  <span style={{ color: T.text.primary, fontWeight: 600 }}>
+                    {entry.assignedToUserName}
+                  </span>
+                </>
+              )}
+            </div>
+            <div style={{
+              marginTop: 10,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 14,
+              flexWrap: 'wrap',
+              fontFamily: T.font.mono,
+              fontSize: 13,
+              color: T.text.subtle,
+              fontVariantNumeric: 'tabular-nums',
+            }}>
+              <span><span style={{ color: T.text.primary, fontWeight: 700, fontSize: 16 }}>{entry.palletCount}</span> Paletten</span>
+              <BetaMetaDot />
+              <span><span style={{ color: T.text.primary, fontWeight: 700, fontSize: 16 }}>{entry.articleCount}</span> Artikel</span>
+              <BetaMetaDot />
+              <span style={{ color: T.accent.text, fontWeight: 700, fontSize: 16 }}>
+                {fmtDurationShort(entry.durationSec)}
+              </span>
+              {ehPerMin != null && Number.isFinite(ehPerMin) && (
+                <>
+                  <BetaMetaDot />
+                  <span>≈{ehPerMin.toFixed(1)} EH/min</span>
+                </>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Schließen"
+            title="Schließen (Esc)"
+            style={{
+              all: 'unset',
+              cursor: 'pointer',
+              width: 36, height: 36,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 999,
+              background: BH_PAPER_BG,
+              color: T.text.subtle,
+              flexShrink: 0,
+              transition: 'background 160ms ease, color 160ms ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = T.text.primary;
+              e.currentTarget.style.color = '#FFFFFF';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = BH_PAPER_BG;
+              e.currentTarget.style.color = T.text.subtle;
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        {/* body — scrollable */}
+        <div style={{
+          background: '#FFFFFF',
+          borderRadius: BH_INNER_RADIUS,
+          flex: 1,
+          minHeight: 0,
+          overflowY: 'auto',
+          padding: '18px 22px 24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 22,
+        }}>
+          {/* Cancellation */}
+          {cancellation && (
+            <BetaCancellationBlock cancellation={cancellation} />
+          )}
+
+          {/* Gantt */}
+          <section>
+            <BetaEyebrow>
+              Palettenzeiten · {palletGantt.length} von {entry.palletCount} mit Daten · {fmtDurationShort(ganttTotal)} kumuliert
+            </BetaEyebrow>
+            <div style={{ marginTop: 12 }}>
+              {palletGantt.length === 0 ? (
+                <div style={{
+                  padding: '14px 16px',
+                  fontSize: 12.5,
+                  color: T.text.faint,
+                  background: BH_PAPER_BG,
+                  borderRadius: 14,
+                }}>
+                  Keine Palettenzeiten erfasst.
+                </div>
+              ) : (
+                <BetaGantt rows={palletGantt} totalSec={ganttTotal} />
+              )}
+            </div>
+          </section>
+
+          {/* Articles */}
+          <section>
+            <BetaEyebrow>
+              Artikel · {detailQ.isLoading ? 'lädt…' : `${articles.length}`}
+            </BetaEyebrow>
+            <div style={{ marginTop: 12 }}>
+              {detailQ.isLoading ? (
+                <div style={{
+                  padding: '20px 8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  color: T.text.subtle,
+                  fontSize: 13,
+                }}>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+                       style={{ animation: 'mb-h-spin 800ms linear infinite' }}>
+                    <circle cx="7" cy="7" r="5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.6" />
+                    <path d="M12 7a5 5 0 0 0-5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                  Artikel werden geladen…
+                </div>
+              ) : detailQ.isError ? (
+                <div style={{
+                  padding: '14px 16px',
+                  fontSize: 12.5,
+                  color: T.status.danger.text,
+                  background: T.status.danger.bg,
+                  borderRadius: 14,
+                }}>
+                  Konnte Artikel nicht laden: {(detailQ.error as Error)?.message || 'Fehler'}
+                </div>
+              ) : articles.length === 0 ? (
+                <div style={{
+                  padding: '14px 16px',
+                  fontSize: 12.5,
+                  color: T.text.faint,
+                  background: BH_PAPER_BG,
+                  borderRadius: 14,
+                }}>
+                  Keine Artikel-Daten gespeichert.
+                </div>
+              ) : (
+                <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {articles.slice(0, 300).map((a, j) => (
+                    <BetaArticleRow
+                      key={j}
+                      pos={j + 1}
+                      article={a}
+                      cancelReason={cancelByKey.get(`${a.palletId}|${a.itemIdx}`) ?? null}
+                      isCancelled={cancelByKey.has(`${a.palletId}|${a.itemIdx}`)}
+                    />
+                  ))}
+                  {articles.length > 300 && (
+                    <li style={{ padding: '8px 12px', fontSize: 11.5, color: T.text.faint }}>
+                      … {articles.length - 300} weitere ausgeblendet
+                    </li>
+                  )}
+                </ul>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function BetaGantt({ rows, totalSec }: { rows: Array<{ id: string; level: number; durSec: number }>; totalSec: number }) {
+  const max = Math.max(...rows.map((r) => r.durSec), 1);
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      padding: '4px 0',
+    }}>
+      {rows.map((r) => {
+        const meta = LEVEL_META[r.level] || LEVEL_META[1];
+        const widthPct = (r.durSec / max) * 100;
+        const sharePct = totalSec > 0 ? (r.durSec / totalSec) * 100 : 0;
+        return (
+          <div key={r.id} style={{
+            display: 'grid',
+            gridTemplateColumns: '78px 1fr 70px',
+            alignItems: 'center',
+            gap: 12,
+          }}>
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: T.text.primary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }} title={r.id}>
+              {r.id}
+            </span>
+            <div
+              title={`${meta.shortName || meta.name} · ${fmtMmSs(r.durSec)} · ${sharePct.toFixed(0)}% Anteil`}
+              style={{
+                position: 'relative',
+                height: 16,
+                background: BH_PAPER_BG,
+                borderRadius: 4,
+                overflow: 'hidden',
+              }}
+            >
+              <div style={{
+                width: `${widthPct}%`,
+                height: '100%',
+                background: meta.color,
+                borderRadius: 4,
+                transition: 'width 320ms cubic-bezier(0.16, 1, 0.3, 1)',
+              }} />
+            </div>
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 12,
+              fontWeight: 500,
+              color: T.text.primary,
+              fontVariantNumeric: 'tabular-nums',
+              textAlign: 'right',
+            }}>
+              {fmtMmSs(r.durSec)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function BetaArticleRow({ pos, article, isCancelled, cancelReason }: {
+  pos: number;
+  article: { palletId: string; sku?: string; fnsku?: string; title?: string; units?: number; useItem?: string; level: number };
+  isCancelled: boolean;
+  cancelReason: string | null;
+}) {
+  const meta = LEVEL_META[article.level] || LEVEL_META[1];
+  return (
+    <li style={{
+      padding: '8px 10px',
+      borderRadius: 10,
+      background: isCancelled ? T.status.danger.bg : 'transparent',
+    }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '24px 14px 78px minmax(0, 1.8fr) minmax(0, 1.1fr) 60px',
+        alignItems: 'center',
+        gap: 10,
+        fontSize: 12,
+      }}>
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 10.5,
+          color: T.text.faint,
+          textAlign: 'right',
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          {String(pos).padStart(2, '0')}
+        </span>
+        <span
+          title={`L${article.level} ${meta.name}`}
+          style={{
+            width: 12, height: 12,
+            borderRadius: 4,
+            background: meta.color,
+            opacity: 0.9,
+          }}
+        />
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 11.5,
+          color: isCancelled ? T.status.danger.text : T.text.faint,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {article.palletId}
+        </span>
+        <span
+          title={article.title || ''}
+          style={{
+            color: isCancelled ? T.status.danger.text : T.text.primary,
+            fontWeight: isCancelled ? 600 : 400,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            letterSpacing: '-0.005em',
+          }}
+        >
+          {article.title || '—'}
+        </span>
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 11.5,
+          color: isCancelled ? T.status.danger.text : T.text.subtle,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {article.fnsku || article.sku || '—'}
+        </span>
+        <span style={{
+          fontFamily: T.font.mono,
+          fontSize: 12,
+          fontWeight: 600,
+          color: isCancelled ? T.status.danger.text : T.text.primary,
+          fontVariantNumeric: 'tabular-nums',
+          textAlign: 'right',
+        }}>
+          × {article.units || 0}
+        </span>
+      </div>
+      {isCancelled && (
+        <div style={{
+          marginTop: 4,
+          paddingLeft: 48,
+          fontSize: 11,
+          fontFamily: T.font.mono,
+          color: T.status.danger.text,
+          letterSpacing: '0.02em',
+        }}>
+          <span style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.10em' }}>Storniert</span>
+          {cancelReason ? <span> · {cancelReason}</span> : null}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function BetaCancellationBlock({ cancellation }: {
+  cancellation: {
+    items: Array<{ palletId: string | null; itemIdx: number | null; code: string | null; title: string | null; reason: string | null }>;
+    note: string | null;
+    at: string;
+    by: { id: string; name: string } | null;
+  };
+}) {
+  const at = cancellation.at ? new Date(cancellation.at) : null;
+  const atFmt = at && !isNaN(at.getTime())
+    ? at.toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : null;
+  const items = cancellation.items || [];
+  return (
+    <section style={{
+      padding: '14px 16px',
+      background: T.status.danger.bg,
+      borderRadius: 14,
+      border: `1px solid ${T.status.danger.border}`,
+    }}>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        marginBottom: 8,
+        flexWrap: 'wrap',
+      }}>
+        <BetaStatusPill tone="danger">Storniert</BetaStatusPill>
+        {cancellation.by?.name && (
+          <span style={{ fontSize: 12, color: T.text.subtle }}>
+            durch <strong style={{ color: T.text.primary }}>{cancellation.by.name}</strong>
+          </span>
+        )}
+        {atFmt && (
+          <span style={{ fontSize: 12, color: T.text.faint, fontVariantNumeric: 'tabular-nums' }}>
+            · {atFmt}
+          </span>
+        )}
+      </div>
+      {cancellation.note && (
+        <div style={{
+          fontSize: 13,
+          color: T.text.primary,
+          marginBottom: items.length ? 10 : 0,
+          whiteSpace: 'pre-wrap',
+          lineHeight: 1.4,
+        }}>
+          {cancellation.note}
+        </div>
+      )}
+      {items.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {items.map((it, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '78px 1fr',
+                gap: 10,
+                fontSize: 12.5,
+                lineHeight: 1.4,
+              }}
+            >
+              <span style={{
+                fontFamily: T.font.mono,
+                fontSize: 11.5,
+                color: T.status.danger.text,
+                fontWeight: 600,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>
+                {it.palletId || 'ESKU'}
+              </span>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ color: T.text.primary, fontWeight: 500, marginRight: 6 }}>
+                  {it.title || it.code || '—'}
+                </span>
+                {it.code && it.code !== it.title && (
+                  <span style={{ fontFamily: T.font.mono, fontSize: 11.5, color: T.text.subtle, marginRight: 6 }}>
+                    · {it.code}
+                  </span>
+                )}
+                {it.reason && (
+                  <span style={{ color: T.status.danger.text, fontStyle: 'italic' }}>
+                    — {it.reason}
+                  </span>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Empty + keyboard hints
+   ════════════════════════════════════════════════════════════════════════ */
+
+function BetaHistorieEmpty() {
+  return (
+    <BetaPaperCard glow>
+      <BetaWhitePanel padding="56px 36px">
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 18,
+          textAlign: 'center',
+        }}>
+          <span style={{
+            width: 64, height: 64,
+            borderRadius: 999,
+            background: BH_PAPER_BG,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: T.text.subtle,
+          }}>
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+              <path d="M3 12a9 9 0 1 0 2.4-6.15" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              <path d="M3 4v4.5h4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M12 7v5l3 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+          <div>
+            <div style={{
+              fontFamily: T.font.ui,
+              fontSize: 22,
+              fontWeight: 600,
+              color: T.text.primary,
+              letterSpacing: '-0.018em',
+              marginBottom: 6,
+            }}>
+              Noch keine abgeschlossenen Aufträge
+            </div>
+            <div style={{
+              fontSize: 13.5,
+              color: T.text.subtle,
+              lineHeight: 1.5,
+              maxWidth: 380,
+              margin: '0 auto',
+            }}>
+              Sobald du den ersten Lagerauftrag durchgearbeitet hast,
+              erscheint er hier mit Palettenzeiten, Artikeln und Rekorden.
+            </div>
+          </div>
+        </div>
+      </BetaWhitePanel>
+    </BetaPaperCard>
+  );
+}
+
+function BetaHistorieKbdHints() {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 18,
+      padding: '14px 16px',
+      marginTop: 10,
+      flexWrap: 'wrap',
+    }}>
+      <BetaKbdHint kbd={<><BetaKbd>j</BetaKbd><BetaKbd>k</BetaKbd></>}>Navigieren</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>⏎</BetaKbd>}>Details</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>/</BetaKbd>}>Suchen</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>e</BetaKbd>}>xlsx Export</BetaKbdHint>
+      <BetaKbdHint kbd={<BetaKbd>x</BetaKbd>}>Löschen</BetaKbdHint>
+    </div>
+  );
+}
+
+function BetaKbdHint({ kbd, children }: any) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      fontFamily: T.font.mono,
+      fontSize: 11,
+      color: T.text.faint,
+      textTransform: 'uppercase',
+      letterSpacing: '0.10em',
+    }}>
+      <span style={{ display: 'inline-flex', gap: 3 }}>{kbd}</span>
       {children}
     </span>
   );
