@@ -462,3 +462,83 @@ export interface ReportsQuery {
   /* Comma-separated level filter, e.g. "1,3,7" */
   levels?: string;
 }
+
+/* ─── LYNNE catalog ─────────────────────────────────────────────────── */
+
+export type LynneChannel = 'PRIME' | 'EV' | 'EV-PRIME' | 'OTHER';
+
+export interface LynneVariant {
+  sku: string;
+  ean: string | null;
+  channel: LynneChannel;
+  weeklySales: number;
+  grazStock: number;
+}
+
+export interface LynneAsinGroup {
+  asin: string;
+  description: string;
+  brand: string;
+  variantCount: number;
+  totalWeeklySales: number;
+  totalGrazStock: number;
+  perPallet: number;
+  variants: LynneVariant[];
+}
+
+export interface LynneCatalog {
+  items: LynneAsinGroup[];
+  totalAsins: number;
+  totalBrands: number;
+  totalGrazStock: number;
+}
+
+/* Admin CRUD DTOs — mirror backend/schemas.py LynneProduct{Read,Create}
+   / LynneVariantPatch / LynneAsinBatchPatch / LynneAsinRename. */
+
+export interface LynneProductRead {
+  id: string;
+  asin: string;
+  sku: string;
+  channel: LynneChannel;
+  ean: string | null;
+  description: string;
+  brand: string;
+  perPallet: number;
+  weeklySales: number;
+  grazStock: number;
+}
+
+export interface LynneProductCreate {
+  asin: string;
+  sku: string;
+  channel: LynneChannel;
+  ean?: string | null;
+  description?: string;
+  brand?: string;
+  perPallet?: number;
+  weeklySales?: number;
+  grazStock?: number;
+}
+
+export interface LynneVariantPatch {
+  asin?: string;
+  sku?: string;
+  channel?: LynneChannel;
+  ean?: string | null;
+  description?: string;
+  brand?: string;
+  perPallet?: number;
+  weeklySales?: number;
+  grazStock?: number;
+}
+
+export interface LynneAsinBatchPatch {
+  description?: string;
+  brand?: string;
+  perPallet?: number;
+}
+
+export interface LynneAsinRename {
+  newAsin: string;
+}

@@ -24,7 +24,7 @@ const STEP_LABEL = {
 };
 
 /* Routes where the pill should NOT show. */
-const PILL_SUPPRESSED = new Set(['workspace', 'warteschlange']);
+const PILL_SUPPRESSED = new Set(['workspace', 'warteschlange', 'lynne-table']);
 
 export function AppShell({ route, onRoute, onOpenCommand, children }) {
   const { beta } = useBetaDesign();

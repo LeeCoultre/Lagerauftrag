@@ -11,9 +11,17 @@ interface BoxIsoProps {
   size: { l: number; w: number; h: number };
   color: string;
   px?: number;
+  /* Edge visibility. 'subtle' (default, Focus mode) → strokeOpacity 0.2,
+     a barely-there hint of level color. 'prominent' (LYNNE-Table) →
+     stronger stroke + wider line so the level color reads at a glance
+     while the faces stay neutral grayscale. */
+  edgeMode?: 'subtle' | 'prominent';
 }
 
-export default function BoxIso({ size, color, px = 76 }: BoxIsoProps) {
+export default function BoxIso({ size, color, px = 76, edgeMode = 'subtle' }: BoxIsoProps) {
+  const prominent = edgeMode === 'prominent';
+  const strokeOpacity = prominent ? 0.45 : 0.2;
+  const strokeWidth = prominent ? 0.028 : 0.022;
   const max = Math.max(size.l, size.w, size.h, 1);
   const L = size.l / max;
   const W = size.w / max;
@@ -45,11 +53,8 @@ export default function BoxIso({ size, color, px = 76 }: BoxIsoProps) {
   const h = maxY - minY || 1;
   const pad = 0.06;
 
-  /* Pure white faces with grayscale gradation — top brightest, right
-     a touch darker, back darkest. The gradient alone carries volume;
-     no strokes, no level-color tint, no shadow. Corner-rounding is
-     baked into the path geometry (per-vertex arc trim) so the cube
-     keeps the soft silhouette even without an outline. */
+  /* Faces stay default neutral white/gray gradation in BOTH modes —
+     only the edge stroke takes the `color`. */
   const top = "#FFFFFF";
   const right = "#ECECEF";
   const back = "#D9D9DD";
@@ -94,8 +99,8 @@ export default function BoxIso({ size, color, px = 76 }: BoxIsoProps) {
         d={roundedPath([v.TBL, v.TBR, v.BBR, v.BBL])}
         fill={back}
         stroke={color}
-        strokeOpacity={0.2}
-        strokeWidth={0.022}
+        strokeOpacity={strokeOpacity}
+        strokeWidth={strokeWidth}
         strokeLinejoin="round"
         strokeLinecap="round"
       />
@@ -103,8 +108,8 @@ export default function BoxIso({ size, color, px = 76 }: BoxIsoProps) {
         d={roundedPath([v.TFR, v.TBR, v.BBR, v.BFR])}
         fill={right}
         stroke={color}
-        strokeOpacity={0.2}
-        strokeWidth={0.022}
+        strokeOpacity={strokeOpacity}
+        strokeWidth={strokeWidth}
         strokeLinejoin="round"
         strokeLinecap="round"
       />
@@ -112,8 +117,8 @@ export default function BoxIso({ size, color, px = 76 }: BoxIsoProps) {
         d={roundedPath([v.TFL, v.TFR, v.TBR, v.TBL])}
         fill={top}
         stroke={color}
-        strokeOpacity={0.2}
-        strokeWidth={0.022}
+        strokeOpacity={strokeOpacity}
+        strokeWidth={strokeWidth}
         strokeLinejoin="round"
         strokeLinecap="round"
       />

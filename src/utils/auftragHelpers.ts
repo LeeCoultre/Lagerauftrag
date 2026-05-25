@@ -2010,3 +2010,57 @@ export function palletTimingRows(pallets, palletTimings) {
     };
   });
 }
+
+/* ─── Pallet intensity profile — per-item composite workload score ────
+   Combines units / volume / weight into a single normalized intensity
+   curve, ordered along the pallet's item sequence. Used by the bottom
+   island heatmap in beta Focus to surface where the heavy work zones
+   are. Per-pallet normalization keeps the shape meaningful regardless
+   of pallet absolute size; the dim/weight branches reuse the same
+   ESKU/Mixed/L7-tacho logic as itemTotalVolumeCm3 / itemTotalWeightKg
+   so quantitative parity with PalletStackViz is guaranteed. */
+export function computePalletIntensityProfile(items) {
+  const arr = Array.isArray(items) ? items : [];
+  if (arr.length === 0) {
+    return { values: [], hasVariance: false };
+  }
+
+  const rows = arr.map((it) => ({
+    units:  Math.max(0, Number(it?.units) || 0),
+    volume: Math.max(0, itemTotalVolumeCm3(it) || 0),
+    weight: Math.max(0, itemTotalWeightKg(it) || 0),
+  }));
+
+  const maxU = rows.reduce((m, r) => Math.max(m, r.units),  0);
+  const maxV = rows.reduce((m, r) => Math.max(m, r.volume), 0);
+  const maxW = rows.reduce((m, r) => Math.max(m, r.weight), 0);
+
+  /* Auto-redistribute weights when a channel is entirely empty (e.g.
+     all items have no dim row → vol is 0). Falls back gracefully to
+     units-only intensity rather than producing a flat line. */
+  let wU = 0.5;
+  let wV = 0.3;
+  let wWt = 0.2;
+  if (maxV === 0) { wU += wV; wV = 0; }
+  if (maxW === 0) { wU += wWt; wWt = 0; }
+  /* If even units are zero, force everything to 0.5 baseline below. */
+
+  const values = rows.map((r) => {
+    if (maxU === 0 && maxV === 0 && maxW === 0) return 0.5;
+    const nU = maxU ? r.units  / maxU : 0;
+    const nV = maxV ? r.volume / maxV : 0;
+    const nW = maxW ? r.weight / maxW : 0;
+    const raw = wU * nU + wV * nV + wWt * nW;
+    return Math.min(1, Math.max(0.05, raw));
+  });
+
+  /* Variance check — coefficient of variation. A near-flat profile
+     (cov < 0.05) lets the renderer draw a soft baseline curve instead
+     of a jagged near-zero waveform. */
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length;
+  const stddev = Math.sqrt(variance);
+  const hasVariance = mean > 0 ? (stddev / mean) >= 0.05 : false;
+
+  return { values, hasVariance };
+}

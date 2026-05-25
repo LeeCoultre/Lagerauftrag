@@ -423,6 +423,101 @@ class HeatmapCell(BaseModel):
     units: int  # total Einheiten processed on this date
 
 
+class LynneVariant(BaseModel):
+    """One SKU×channel row under an ASIN group."""
+    sku: str
+    ean: Optional[str] = None
+    channel: str  # PRIME | EV | EV-PRIME | OTHER
+    weeklySales: int = 0
+    grazStock: int = 0
+
+
+class LynneAsinGroup(BaseModel):
+    """Aggregated catalog entry. One ASIN = several variants (SKU×channel).
+
+    `description`, `brand`, `perPallet` are taken from the first variant —
+    same product, those values don't vary across variants by business rule.
+    """
+    asin: str
+    description: str
+    brand: str
+    variantCount: int
+    totalWeeklySales: int
+    totalGrazStock: int
+    perPallet: int
+    variants: list[LynneVariant] = Field(default_factory=list)
+
+
+class LynneCatalog(BaseModel):
+    """Top-level wrapper — gives the UI summary line totals for the
+    sticky header without a second round-trip."""
+    items: list[LynneAsinGroup] = Field(default_factory=list)
+    totalAsins: int = 0
+    totalBrands: int = 0
+    totalGrazStock: int = 0
+
+
+# ─── Admin CRUD DTOs for lynne_products ────────────────────────────
+# Used by /api/lynne/admin/* endpoints. Frontend-facing field names stay
+# camelCase to match the existing read schemas above.
+
+class LynneProductRead(BaseModel):
+    """Single row DTO — response shape for POST/PATCH on lynne_products."""
+    id: str
+    asin: str
+    sku: str
+    channel: str
+    ean: Optional[str] = None
+    description: str = ""
+    brand: str = ""
+    perPallet: int = 0
+    weeklySales: int = 0
+    grazStock: int = 0
+
+
+class LynneProductCreate(BaseModel):
+    """Create a new SKU row. asin/sku/channel are required; everything else
+    defaults to empty/zero. Server builds the `<asin>__<sku>` id."""
+    asin: str = Field(..., min_length=1, max_length=20)
+    sku: str = Field(..., min_length=1, max_length=50)
+    channel: str = Field(..., min_length=1, max_length=16)
+    ean: Optional[str] = Field(default=None, max_length=20)
+    description: str = ""
+    brand: str = Field(default="", max_length=80)
+    perPallet: int = Field(default=0, ge=0)
+    weeklySales: int = Field(default=0, ge=0)
+    grazStock: int = Field(default=0, ge=0)
+
+
+class LynneVariantPatch(BaseModel):
+    """Partial per-row update. If `asin` or `sku` are present, the server
+    re-computes `id` via DELETE+INSERT (PostgreSQL doesn't accept UPDATE on
+    a primary key in a single statement reliably)."""
+    asin: Optional[str] = Field(default=None, min_length=1, max_length=20)
+    sku: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    channel: Optional[str] = Field(default=None, min_length=1, max_length=16)
+    ean: Optional[str] = Field(default=None, max_length=20)
+    description: Optional[str] = None
+    brand: Optional[str] = Field(default=None, max_length=80)
+    perPallet: Optional[int] = Field(default=None, ge=0)
+    weeklySales: Optional[int] = Field(default=None, ge=0)
+    grazStock: Optional[int] = Field(default=None, ge=0)
+
+
+class LynneAsinBatchPatch(BaseModel):
+    """Batch update of group-level fields across every variant under
+    one ASIN. Use for description / brand / per_pallet corrections."""
+    description: Optional[str] = None
+    brand: Optional[str] = Field(default=None, max_length=80)
+    perPallet: Optional[int] = Field(default=None, ge=0)
+
+
+class LynneAsinRename(BaseModel):
+    """Move every variant from one ASIN to another. Conflicts (target ASIN
+    already exists) → 409."""
+    newAsin: str = Field(..., min_length=1, max_length=20)
+
+
 class ReportsAggregates(BaseModel):
     """Server-side aggregates for the Berichte analytics widgets.
     The 4 sections (Format-Verteilung, Aktivität-Heatmap, Level-Stack,

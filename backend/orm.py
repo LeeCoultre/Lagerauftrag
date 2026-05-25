@@ -266,3 +266,40 @@ class SkuDimension(Base):
             or "?"
         )
         return f"<SkuDimension {key} {self.length_cm}×{self.width_cm}×{self.height_cm} cm>"
+
+
+# ─── lynne_products ──────────────────────────────────────────────────
+# Master catalog of LYNNE products, fed from the weekly
+# Produktaufstellung_KWxx.xlsx (sheet "Verkäufe"). One row = one
+# ASIN × SKU × channel triple. Lives independently of Marathon's
+# operational tables — auftraege can be wiped without affecting the
+# catalog.
+
+class LynneProduct(Base):
+    __tablename__ = "lynne_products"
+
+    # Composite key as a single string: "<asin>__<sku>" — matches the
+    # convention used by the lynne-verkaeufe project's seed.json.
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+
+    asin: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)  # PRIME|EV|EV-PRIME|OTHER
+    sku: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    ean: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    brand: Mapped[str] = mapped_column(String(80), nullable=False, server_default=text("''"), index=True)
+
+    weekly_sales: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    graz_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    per_pallet: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<LynneProduct {self.asin} {self.sku} [{self.channel}]>"

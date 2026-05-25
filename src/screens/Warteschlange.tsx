@@ -1996,6 +1996,9 @@ function BetaWarteschlange({ onRoute }) {
   const [dragFromIdx, setDragFromIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [drawerEntryId, setDrawerEntryId] = useState<string | null>(null);
+  /* Inline-expansion state for the Nächster Auftrag mini card — keeps
+     the preview within the block instead of opening the legacy drawer. */
+  const [expandedNextId, setExpandedNextId] = useState<string | null>(null);
   const [flash, setFlash]             = useState<string | null>(null);
 
   const inputRef  = useRef<HTMLInputElement | null>(null);
@@ -2250,11 +2253,37 @@ function BetaWarteschlange({ onRoute }) {
         />
 
         {/* HERO — when a workflow is in progress, the active Auftrag is the
-            dominant card; the head-of-queue moves into the compact mini
-            below. When no workflow is active, the head-of-queue takes the
-            full hero treatment so the worker sees what to start next. */}
+            dominant card; the head-of-queue is rendered as a bare mini
+            panel INSIDE the same paper island so «In Bearbeitung» and
+            «Nächster Auftrag» read as one combined unit. When no workflow
+            is active, the head-of-queue takes the full hero treatment so
+            the worker sees what to start next. */}
         {current ? (
-          <BetaCurrentHeroCard current={current} onRoute={onRoute} />
+          (() => {
+            const headDisplayIdx = headEntry
+              ? visible.findIndex((e) => e.id === headEntry.id)
+              : -1;
+            const nextSlot = (hasQueue && !noResults && headEntry && headDisplayIdx >= 0) ? (
+              <BetaNextMiniCard
+                bare
+                entry={headEntry}
+                queueIdx={queue.findIndex((q) => q.id === headEntry.id)}
+                isSelected={headDisplayIdx === selectedIdx}
+                isExpanded={expandedNextId === headEntry.id}
+                onToggleExpand={() => setExpandedNextId(
+                  (prev) => prev === headEntry.id ? null : headEntry.id,
+                )}
+                {...rowHandlers(headEntry, headDisplayIdx)}
+              />
+            ) : null;
+            return (
+              <BetaCurrentHeroCard
+                current={current}
+                onRoute={onRoute}
+                nextSlot={nextSlot}
+              />
+            );
+          })()
         ) : hasQueue && !noResults && headEntry && (() => {
           const displayIdx = visible.findIndex((e) => e.id === headEntry.id);
           return (
@@ -2263,19 +2292,6 @@ function BetaWarteschlange({ onRoute }) {
               queueIdx={queue.findIndex((q) => q.id === headEntry.id)}
               isSelected={displayIdx === selectedIdx}
               hasCurrent={false}
-              {...rowHandlers(headEntry, displayIdx)}
-            />
-          );
-        })()}
-
-        {/* MINI next-up — only when current workflow is running */}
-        {current && hasQueue && !noResults && headEntry && (() => {
-          const displayIdx = visible.findIndex((e) => e.id === headEntry.id);
-          return (
-            <BetaNextMiniCard
-              entry={headEntry}
-              queueIdx={queue.findIndex((q) => q.id === headEntry.id)}
-              isSelected={displayIdx === selectedIdx}
               {...rowHandlers(headEntry, displayIdx)}
             />
           );
@@ -2450,16 +2466,19 @@ function BetaWarteschlangeStyles() {
   );
 }
 
-function BetaPaperCard({ children, glow = false, padding = 8 }: { children?: React.ReactNode; glow?: boolean; padding?: number }) {
+function BetaPaperCard({ children, glow = false, flat = false, padding = 8 }: { children?: React.ReactNode; glow?: boolean; flat?: boolean; padding?: number }) {
+  const shadow = flat
+    ? 'none'
+    : glow
+      ? '0 0 0 0.5px rgba(255,91,31,0.18), 0 16px 48px rgba(255,91,31,0.10), 0 0 89.7px rgba(0,0,0,0.05)'
+      : '0 0 89.7px rgba(0,0,0,0.05)';
   return (
     <div style={{
       padding,
       background: BETA_PAPER_BG,
       border: `2px solid ${BETA_PAPER_RIM}`,
       borderRadius: BETA_PAPER_RADIUS,
-      boxShadow: glow
-        ? '0 0 0 0.5px rgba(255,91,31,0.18), 0 16px 48px rgba(255,91,31,0.10), 0 0 89.7px rgba(0,0,0,0.05)'
-        : '0 0 89.7px rgba(0,0,0,0.05)',
+      boxShadow: shadow,
       display: 'flex',
       flexDirection: 'column',
       gap: 8,
@@ -2670,15 +2689,17 @@ function BetaActionDock({
       maxWidth: 'calc(100vw - 24px)',
       zIndex: 60,
       pointerEvents: 'auto',
+      borderRadius: BETA_PAPER_RADIUS,
+      boxShadow: 'rgba(0, 0, 0, 0.05) 0px 0px 89.7px 0px',
     }}>
-      <BetaPaperCard padding={6}>
-        <BetaWhitePanel padding="6px 8px">
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            flexWrap: 'nowrap',
-          }}>
+      <BetaPaperCard padding={8}>
+        <div style={{
+          padding: '4px 6px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          flexWrap: 'nowrap',
+        }}>
             <BetaDockUploadButton
               over={over} busy={busy}
               onPickFile={onPickFile}
@@ -2781,8 +2802,7 @@ function BetaActionDock({
                 </button>
               </>
             )}
-          </div>
-        </BetaWhitePanel>
+        </div>
       </BetaPaperCard>
     </div>
   );
@@ -2817,7 +2837,7 @@ function BetaDockMenu({
           gap: 6,
           padding: '7px 12px',
           borderRadius: 999,
-          background: open ? BETA_PAPER_BG : 'transparent',
+          background: open ? '#FFFFFF' : 'transparent',
           color: open ? T.text.primary : T.text.secondary,
           fontFamily: T.font.ui,
           fontSize: 12,
@@ -2826,7 +2846,7 @@ function BetaDockMenu({
           transition: 'background 160ms ease, color 160ms ease',
         }}
         onMouseEnter={(e) => {
-          if (!open) e.currentTarget.style.background = BETA_PAPER_BG;
+          if (!open) e.currentTarget.style.background = '#FFFFFF';
         }}
         onMouseLeave={(e) => {
           if (!open) e.currentTarget.style.background = 'transparent';
@@ -2969,7 +2989,7 @@ function BetaDockUploadButton({ over, busy, onPickFile, onDragOver, onDragLeave,
         gap: 8,
         padding: '7px 14px 7px 10px',
         borderRadius: 999,
-        background: over ? T.accent.bg : BETA_PAPER_BG,
+        background: over ? T.accent.bg : '#FFFFFF',
         boxShadow: over ? `inset 0 0 0 1.5px var(--accent)` : 'none',
         transition: 'background 180ms ease, box-shadow 180ms ease',
         flexShrink: 0,
@@ -2978,7 +2998,7 @@ function BetaDockUploadButton({ over, busy, onPickFile, onDragOver, onDragLeave,
       <span style={{
         width: 24, height: 24,
         borderRadius: 999,
-        background: over ? 'var(--accent)' : '#FFFFFF',
+        background: over ? 'var(--accent)' : BETA_PAPER_BG,
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -3064,7 +3084,7 @@ function BetaSearchInput({ value, onChange, refEl, placeholder, compact = false 
       alignItems: 'center',
       gap: compact ? 6 : 8,
       padding: compact ? '6px 10px' : '7px 14px',
-      background: BETA_PAPER_BG,
+      background: '#FFFFFF',
       borderRadius: 999,
       minWidth: compact ? 180 : 240,
       flex: compact ? '0 1 220px' : '1 1 240px',
@@ -3128,7 +3148,7 @@ function BetaSortChip({ active, onClick, title, children }) {
         cursor: 'pointer',
         padding: '7px 13px',
         borderRadius: 999,
-        background: active ? T.text.primary : (hover ? BETA_PAPER_BG : 'transparent'),
+        background: active ? T.text.primary : (hover ? '#FFFFFF' : 'transparent'),
         color: active ? '#FFFFFF' : T.text.secondary,
         fontFamily: T.font.ui,
         fontSize: 12,
@@ -3259,7 +3279,15 @@ function BetaDropPill({ over, busy, onPickFile, onDragOver, onDragLeave, onDrop 
    bar, Fortsetzen instead of Starten).
    ════════════════════════════════════════════════════════════════════════ */
 
-function BetaCurrentHeroCard({ current, onRoute }) {
+function BetaCurrentHeroCard({ current, onRoute, nextSlot = null }: {
+  current: any;
+  onRoute?: (r: string) => void;
+  /* Optional second panel rendered INSIDE the same paper-island —
+     used to merge the "Nächster Auftrag" mini card under the current
+     hero so both cards share one paper rim. Pass a <BetaNextMiniCard
+     bare ... /> here. */
+  nextSlot?: React.ReactNode;
+}) {
   const fba = current.parsed?.meta?.sendungsnummer
     || current.parsed?.meta?.fbaCode
     || current.fileName;
@@ -3277,8 +3305,13 @@ function BetaCurrentHeroCard({ current, onRoute }) {
     : null;
 
   return (
-    <BetaPaperCard glow>
-      <BetaWhitePanel padding="28px 32px 26px">
+    <BetaPaperCard flat>
+      {/* In Bearbeitung — bare panel: no white surface so the section
+          blends into the paper-island bg. Only the Nächster Auftrag mini
+          (rendered via nextSlot) keeps its white card, giving the
+          combined island a clear figure/ground hierarchy: current step
+          sits ON the paper, next-up sits ABOVE it. */}
+      <div style={{ padding: '28px 32px 26px' }}>
         {/* eyebrow + status row */}
         <div style={{
           display: 'flex',
@@ -3313,7 +3346,7 @@ function BetaCurrentHeroCard({ current, onRoute }) {
         {/* big mono FBA */}
         <BetaBigCopy value={fba} rawValue={String(fba || '')} />
 
-        {/* meta line — filename + palette progress + remaining time */}
+        {/* meta line — filename + remaining time */}
         <div style={{
           marginTop: 6,
           display: 'flex',
@@ -3332,10 +3365,6 @@ function BetaCurrentHeroCard({ current, onRoute }) {
           }}>
             {fileName}
           </span>
-          <BetaMetaDot />
-          <span style={{ color: T.text.primary, fontWeight: 600 }}>
-            Palette {curNum} von {totalP}
-          </span>
           {remainingSec != null && (
             <>
               <BetaMetaDot />
@@ -3346,18 +3375,12 @@ function BetaCurrentHeroCard({ current, onRoute }) {
           )}
         </div>
 
-        {/* hairline */}
-        <div style={{
-          height: 1,
-          background: 'rgba(15,23,42,0.08)',
-          margin: '20px 0 16px',
-        }} />
-
         {/* progress bar */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
           gap: 14,
+          marginTop: 20,
         }}>
           <span style={{
             flex: 1,
@@ -3374,7 +3397,6 @@ function BetaCurrentHeroCard({ current, onRoute }) {
               background: T.accent.main,
               borderRadius: 5,
               transition: 'width 320ms cubic-bezier(0.16,1,0.3,1)',
-              boxShadow: pct > 0 ? `0 0 0 0.5px ${T.accent.main}` : 'none',
             }} />
           </span>
           <span style={{
@@ -3391,19 +3413,13 @@ function BetaCurrentHeroCard({ current, onRoute }) {
           </span>
         </div>
 
-        {/* hairline */}
-        <div style={{
-          height: 1,
-          background: 'rgba(15,23,42,0.08)',
-          margin: '16px 0 18px',
-        }} />
-
         {/* stats + CTA */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
           gap: 16,
           flexWrap: 'wrap',
+          marginTop: 18,
         }}>
           <BetaStat value={totalP} label="Paletten" />
           <BetaStat value={totalArticles.toLocaleString('de-DE')} label="Artikel" />
@@ -3426,8 +3442,7 @@ function BetaCurrentHeroCard({ current, onRoute }) {
               fontSize: 13.5,
               fontWeight: 600,
               letterSpacing: '-0.005em',
-              boxShadow: '0 8px 22px rgba(255,91,31,0.28)',
-              transition: 'transform 160ms ease, box-shadow 160ms ease',
+              transition: 'transform 160ms ease',
             }}
           >
             Fortsetzen
@@ -3436,7 +3451,11 @@ function BetaCurrentHeroCard({ current, onRoute }) {
             </svg>
           </button>
         </div>
-      </BetaWhitePanel>
+      </div>
+      {/* Optional Nächster-Auftrag panel — shares this paper island so
+          both cards read as one cohesive «what you're on + what's next»
+          unit instead of two visually-disconnected stacks. */}
+      {nextSlot}
     </BetaPaperCard>
   );
 }
@@ -3453,7 +3472,16 @@ function BetaNextMiniCard({
   onSelect, onRemove, onPreview, onUp, onDown,
   onDragStart, onDragOver, onDrop, onDragEnd,
   isDragging, isDropAbove, isDropBelow,
-}) {
+  /* `bare` — render the inner WhitePanel directly without an outer
+     BetaPaperCard. Used when this mini sits inside another paper
+     island (e.g. merged under BetaCurrentHeroCard via nextSlot). */
+  bare = false,
+  /* Inline expansion — when true, the card unfolds the same content the
+     old Vorschau drawer used to show (pallets list with positions). No
+     popup, no overlay; the block grows in place. */
+  isExpanded = false,
+  onToggleExpand,
+}: any) {
   const fba = entry.parsed?.meta?.sendungsnummer
     || entry.parsed?.meta?.fbaCode
     || entry.fileName;
@@ -3462,25 +3490,35 @@ function BetaNextMiniCard({
   const validWarns  = entry.validation?.warningCount || 0;
   const fp = entry._fp;
 
-  return (
-    <div
-      draggable
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      onDragEnd={onDragEnd}
-      onClick={onSelect}
-      style={{
-        position: 'relative',
-        opacity: isDragging ? 0.4 : 1,
-        cursor: 'pointer',
-      }}
-    >
-      {isDropAbove && <BetaDropLine position="above" />}
-      {isDropBelow && <BetaDropLine position="below" />}
+  /* Lazy-load the full parsed pallets ONLY when expanded — keeps the
+     queue list cheap when many entries are collapsed. Mirrors the
+     BetaPreviewDrawer's data flow so the inline view and the (now
+     removed) popup show identical content. */
+  const detailQ = useQuery({
+    queryKey: ['auftrag', entry.id],
+    queryFn: () => getAuftrag(entry.id),
+    staleTime: Infinity,
+    refetchInterval: false,
+    enabled: isExpanded && !entry.parsed?.pallets,
+    initialData: entry.parsed?.pallets ? (entry as unknown as Awaited<ReturnType<typeof getAuftrag>>) : undefined,
+  });
+  const parsed = (detailQ.data?.parsed ?? entry.parsed) as
+    | { pallets?: PreviewPallet[]; einzelneSkuItems?: unknown[]; meta?: Record<string, unknown> }
+    | null | undefined;
+  const expandedPallets = parsed?.pallets || [];
+  const sortedExpandedPallets = useMemo(
+    () => (expandedPallets.length ? (sortPallets(expandedPallets) as PreviewPallet[]) : []),
+    [expandedPallets],
+  );
+  const eskuExpanded = (parsed?.einzelneSkuItems as unknown[])?.length || 0;
+  const expandedTotalUnits = sortedExpandedPallets.reduce(
+    (s, p) => s + (p.items || []).reduce((u, it) => u + (Number(it.units) || 0), 0),
+    0,
+  );
+  const expandedTotalItems = sortedExpandedPallets.reduce((s, p) => s + (p.items?.length || 0), 0);
 
-      <BetaPaperCard>
-        <BetaWhitePanel padding="16px 22px">
+  const inner = (
+    <BetaWhitePanel padding="16px 22px">
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -3576,37 +3614,138 @@ function BetaNextMiniCard({
                   <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                 </svg>
               </BetaRowAction>
-              <span style={{ width: 4 }} />
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onPreview(); }}
-                disabled={isError}
-                style={{
-                  all: 'unset',
-                  cursor: isError ? 'not-allowed' : 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 7,
-                  padding: '8px 14px',
-                  borderRadius: 999,
-                  background: BETA_PAPER_BG,
-                  color: isError ? T.text.faint : T.text.secondary,
-                  fontFamily: T.font.ui,
-                  fontSize: 12.5,
-                  fontWeight: 600,
-                }}
-              >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" strokeWidth="1.5">
-                  <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" />
-                  <circle cx="8" cy="8" r="2" />
-                </svg>
-                Vorschau
-              </button>
             </div>
+
+            {/* Chevron — sits OUTSIDE the actions cluster so its click
+                bubbles up to the row's onClick (toggles expansion).
+                Inside the cluster it would have been absorbed by
+                stopPropagation, breaking the cue/affordance contract. */}
+            <span aria-hidden style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 28, height: 28,
+              marginLeft: 4,
+              color: T.text.faint,
+              transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 220ms cubic-bezier(0.16, 1, 0.3, 1)',
+            }}>
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                <path d="M3 5l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
           </div>
-        </BetaWhitePanel>
-      </BetaPaperCard>
+          {/* Inline expansion — pallets list with same info the old
+              Vorschau drawer carried. Lives inside the same white panel
+              so the card grows in place without overlay/popup. */}
+          {isExpanded && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                marginTop: 16,
+                paddingTop: 16,
+                borderTop: `1px solid ${T.border.subtle}`,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
+              }}
+            >
+              {/* Compact summary line — mirrors the drawer header stats */}
+              <div style={{
+                fontSize: 12,
+                color: T.text.subtle,
+                fontVariantNumeric: 'tabular-nums',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                flexWrap: 'wrap',
+              }}>
+                <span>{sortedExpandedPallets.length} Paletten</span>
+                <BetaMetaDot />
+                <span>{expandedTotalItems} Positionen</span>
+                <BetaMetaDot />
+                <span>{expandedTotalUnits.toLocaleString('de-DE')} Einheiten</span>
+                {eskuExpanded > 0 && (
+                  <>
+                    <BetaMetaDot />
+                    <span style={{ color: T.accent.text, fontWeight: 600 }}>
+                      {eskuExpanded} ESKU
+                    </span>
+                  </>
+                )}
+              </div>
+
+              {/* Pallets list — reuses BetaDrawerPalletBlock so inline
+                  view and the legacy drawer rendered identical content. */}
+              {detailQ.isPending && !parsed ? (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 0', color: T.text.subtle, fontSize: 13,
+                }}>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+                       style={{ animation: 'mb-q-spin 800ms linear infinite' }}>
+                    <circle cx="7" cy="7" r="5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.6" />
+                    <path d="M12 7a5 5 0 0 0-5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                  Vorschau wird geladen…
+                </div>
+              ) : detailQ.isError && !parsed ? (
+                <div style={{ color: T.status.danger.text, fontSize: 13 }}>
+                  Vorschau konnte nicht geladen werden.
+                </div>
+              ) : !sortedExpandedPallets.length ? (
+                <div style={{ color: T.text.subtle, fontSize: 13 }}>
+                  Keine Paletten in diesem Auftrag.
+                </div>
+              ) : (
+                <ul style={{
+                  listStyle: 'none', margin: 0, padding: 0,
+                  display: 'flex', flexDirection: 'column', gap: 10,
+                  maxHeight: 360, overflowY: 'auto',
+                  /* Wheel-isolation — same trick as Focus's intensity tray
+                     so scrolling the pallet list doesn't bubble up to
+                     parent scroll handlers. */
+                  overscrollBehavior: 'contain',
+                }}
+                onWheel={(e) => e.stopPropagation()}>
+                  {sortedExpandedPallets.map((p, idx) => (
+                    <BetaDrawerPalletBlock key={p.id || idx} pallet={p} index={idx} />
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+    </BetaWhitePanel>
+  );
+
+  /* Whole-row click toggles the inline expansion (no popup). onSelect
+     still fires for keyboard-nav consistency. Parse-error entries can't
+     be expanded but stay clickable for actions/selection. */
+  const handleRowClick = () => {
+    onSelect?.();
+    if (!isError) onToggleExpand?.();
+  };
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      onClick={handleRowClick}
+      title={isError
+        ? 'Parse-Fehler — Vorschau nicht verfügbar'
+        : isExpanded ? 'Zuklappen' : 'Klick zeigt Vorschau direkt im Block'}
+      style={{
+        position: 'relative',
+        opacity: isDragging ? 0.4 : 1,
+        cursor: isError ? 'default' : 'pointer',
+      }}
+    >
+      {isDropAbove && <BetaDropLine position="above" />}
+      {isDropBelow && <BetaDropLine position="below" />}
+      {bare ? inner : <BetaPaperCard>{inner}</BetaPaperCard>}
     </div>
   );
 }

@@ -302,10 +302,12 @@ function ConfirmDialog({
                 e.currentTarget.style.filter = 'none';
               }}
               onFocus={(e) => {
+                if (beta) return;
                 e.currentTarget.style.outline = `2px solid ${tone === 'danger' ? T.status.danger.main : T.accent.main}`;
                 e.currentTarget.style.outlineOffset = '2px';
               }}
               onBlur={(e) => {
+                if (beta) return;
                 e.currentTarget.style.outline = 'none';
               }}
             >

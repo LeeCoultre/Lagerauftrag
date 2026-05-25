@@ -63,6 +63,7 @@ const SucheScreen          = lazyWithReload(() => import('./screens/Suche.jsx'))
 const LiveAktivitaetScreen = lazyWithReload(() => import('./screens/LiveAktivitaet.jsx'));
 const BerichteScreen       = lazyWithReload(() => import('./screens/Berichte.jsx'));
 const WarteschlangeScreen  = lazyWithReload(() => import('./screens/Warteschlange.jsx'));
+const LynneTableScreen     = lazyWithReload(() => import('./screens/LynneTable.jsx'));
 
 /* Legacy localStorage keys from the pre-backend era. Stale data left
    in old browsers; harmless but pollutes devtools. One-shot cleanup. */
@@ -112,20 +113,32 @@ export default function App() {
   );
 }
 
+const ROUTE_KEY = 'marathon.route.v1';
+const VALID_ROUTES = new Set([
+  'workspace', 'warteschlange', 'suche', 'historie',
+  'live', 'berichte', 'einstellungen', 'admin', 'lynne-table',
+]);
+
 function Router() {
-  const { current } = useAppState();
-  const [route, setRoute] = useState('workspace');
+  const [route, setRoute] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(ROUTE_KEY);
+      if (saved && VALID_ROUTES.has(saved)) return saved;
+    } catch { /* ignore */ }
+    return 'workspace';
+  });
+  useEffect(() => {
+    try { localStorage.setItem(ROUTE_KEY, route); } catch { /* ignore */ }
+  }, [route]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sucheInitialQuery, setSucheInitialQuery] = useState('');
 
-  /* When a new Auftrag becomes current, jump back to Workspace so the user
-     sees Pruefen / Focus / Abschluss instead of staying on Historie. */
-  useEffect(() => {
-    if (current) setRoute('workspace');
-    // We only re-trigger when identity/step changes, not on every render of
-    // the (heavy) `current` object — eslint-disable is intentional.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id, current?.step]);
+  /* Auto-redirect to Workspace when a new Auftrag becomes current was
+     removed: `current` loads asynchronously via TanStack Query, so the
+     effect always fired after data settles and overwrote the restored
+     route from localStorage on every refresh.
+     The action handlers that create a new current (Warteschlange start,
+     Upload finish) already call `onRoute('workspace')` explicitly. */
 
   /* Global Cmd/Ctrl+K → Command Palette. Keep the listener on document
      so it fires regardless of which child has focus, except when typing
@@ -156,6 +169,7 @@ function Router() {
         onRoute={setRoute}
         onOpenCommand={() => setPaletteOpen(true)}
       >
+        {route === 'lynne-table'   && <LazyRoute><LynneTableScreen /></LazyRoute>}
         {route === 'workspace'     && <LazyRoute><Workspace onRoute={setRoute} /></LazyRoute>}
         {route === 'warteschlange' && <LazyRoute><WarteschlangeScreen onRoute={setRoute} /></LazyRoute>}
         {route === 'suche'         && <LazyRoute><SucheScreen initialQuery={sucheInitialQuery} /></LazyRoute>}

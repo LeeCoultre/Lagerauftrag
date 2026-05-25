@@ -551,8 +551,7 @@ function ParseWarningsPanel({
           fontSize: 10.5,
           fontWeight: 700,
           letterSpacing: '0.16em',
-          textTransform: 'uppercase',
-          color: T.text.faint,
+              color: T.text.faint,
         }}>
           Parser-Warnungen
         </span>
@@ -581,8 +580,7 @@ function ParseWarningsPanel({
             fontSize: 10,
             fontWeight: 700,
             letterSpacing: '0.10em',
-            textTransform: 'uppercase',
-          }}>
+                }}>
             Focus blockiert · {counts.high} kritisch
           </span>
         )}
@@ -658,8 +656,7 @@ function ParseWarningRow({
             fontSize: 10.5,
             fontWeight: 700,
             letterSpacing: '0.10em',
-            textTransform: 'uppercase',
-            color: T.text.faint,
+                  color: T.text.faint,
             flexShrink: 0,
           }}>
             {row.palletId} · #{row.itemIdx + 1}
@@ -799,8 +796,7 @@ function ParseWarningRow({
             fontSize: 10,
             fontWeight: 700,
             letterSpacing: '0.10em',
-            textTransform: 'uppercase',
-          }}>
+                }}>
             ✓ akzeptiert
           </span>
         ) : (
@@ -917,7 +913,7 @@ function HeroFBA({ view, stats, validView, insights, palletStates, onJumpToPalle
             }}>
               {insights.map((ins, i) => (
                 <span key={ins.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                  <span style={{ color: T.text.subtle, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                  <span style={{ color: T.text.subtle, letterSpacing: '0.04em' }}>
                     {ins.label}
                   </span>
                   <span style={{ color: T.text.secondary, fontWeight: 500 }}>
@@ -1050,8 +1046,7 @@ function FingerprintRow({ pallets, palletStates, onClick }) {
           fontSize: 10,
           fontWeight: 600,
           color: T.text.faint,
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
+              letterSpacing: '0.12em',
           fontFamily: T.font.mono,
         }}>
           Fingerprint
@@ -1157,8 +1152,7 @@ function Metric({ value, label }) {
       <span style={{
         fontSize: 11,
         color: T.text.faint,
-        textTransform: 'uppercase',
-        letterSpacing: '0.06em',
+          letterSpacing: '0.06em',
         fontFamily: T.font.mono,
       }}>
         {label}
@@ -1219,8 +1213,7 @@ function FillMetric({ pct }) {
       <span style={{
         fontSize: 11,
         color: T.text.faint,
-        textTransform: 'uppercase',
-        letterSpacing: '0.06em',
+          letterSpacing: '0.06em',
         fontFamily: T.font.mono,
       }}>
         Auslastung
@@ -1255,8 +1248,7 @@ function LevelsDisclosure({ pallets, open, onToggle }: { pallets: unknown[]; ope
           color: T.text.subtle,
           fontFamily: T.font.mono,
           letterSpacing: '0.04em',
-          textTransform: 'uppercase',
-          fontWeight: 500,
+              fontWeight: 500,
           borderRadius: 4,
           transition: 'color 160ms',
         }}
@@ -2211,22 +2203,6 @@ function BetaPruefen() {
 
   const searchQ = searchQuery.trim().toLowerCase();
 
-  const visiblePallets = useMemo(() => {
-    let arr = view?.pallets || [];
-    if (problemOnly) {
-      arr = arr.filter((p) => {
-        const st = palletStates[p.id];
-        return st && Array.isArray(st.flags) && st.flags.length > 0;
-      });
-    }
-    if (searchQ) {
-      arr = arr.filter((p) => (palletSearchIndex.get(p.id) || '').includes(searchQ));
-    }
-    return arr;
-  }, [view?.pallets, palletStates, problemOnly, searchQ, palletSearchIndex]);
-
-  const hiddenByFilter = (view?.pallets?.length || 0) - visiblePallets.length;
-
   /* ── Focus gate + keyboard (same as classic) ─────────────────────── */
   const focusBlocked = validView.errors > 0 || blockingWarnings.length > 0;
   const onStartFocus = () => { if (!focusBlocked) goToStep('focus'); };
@@ -2304,6 +2280,40 @@ function BetaPruefen() {
 
   const hasHinweise = hinweise.rows.length > 0;
   const unackedHigh = hinweise.high.filter((r) => !r.ackable || !acked.has(r.ackKey || '')).length;
+
+  /* IDs of pallets referenced by any Preflight Hinweis row — used by
+     «Nur Hinweise» so the filter catches per-pallet parser warnings
+     even when the pallet has no runtime overload flag. */
+  const palletIdsWithHinweise = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of (hinweise?.rows || [])) {
+      const pid = r?.target?.palletId;
+      if (pid) s.add(pid);
+    }
+    return s;
+  }, [hinweise]);
+
+  const visiblePallets = useMemo(() => {
+    let arr = view?.pallets || [];
+    if (problemOnly) {
+      arr = arr.filter((p) => {
+        const st = palletStates[p.id];
+        /* Match if any of: runtime overload flag, parser hint targets
+           this pallet, or 4-Seiten-Warnung (single-SKU constraint —
+           «слегка проблемная» по Amazon-стандарту). */
+        if (st && Array.isArray(st.flags) && st.flags.length > 0) return true;
+        if (palletIdsWithHinweise.has(p.id)) return true;
+        if (p.isSingleSku || p.hasFourSideWarning) return true;
+        return false;
+      });
+    }
+    if (searchQ) {
+      arr = arr.filter((p) => (palletSearchIndex.get(p.id) || '').includes(searchQ));
+    }
+    return arr;
+  }, [view?.pallets, palletStates, problemOnly, searchQ, palletSearchIndex, palletIdsWithHinweise]);
+
+  const hiddenByFilter = (view?.pallets?.length || 0) - visiblePallets.length;
 
   /* ── Severity for identity eyebrow ───────────────────────────────── */
   const severity: 'ok' | 'warn' | 'err' =
@@ -2410,24 +2420,8 @@ function BetaPruefen() {
         {/* ── IDENTITY + PREFLIGHT — combined paper-island ───────── */}
         <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) backwards' }}>
           <BetaPaperCard>
-            <BetaWhitePanel padding="28px 32px">
-              <BetaEyebrow
-                color={severity === 'ok' ? T.status.success.text
-                      : severity === 'warn' ? T.status.warn.text
-                      : T.status.danger.text}
-                icon={severity === 'ok' ? <BetaCheckIcon />
-                     : severity === 'warn' ? <BetaWarnIcon />
-                     : <BetaXIcon />}
-              >
-                {severity === 'ok'
-                  ? 'Alles validiert'
-                  : severity === 'err'
-                    ? `${validView.errors} Fehler`
-                    : `${validView.warnings + unackedHigh} Hinweis${(validView.warnings + unackedHigh) === 1 ? '' : 'e'}`}
-              </BetaEyebrow>
-              <div style={{ marginTop: 10 }}>
-                <BetaBigCopy value={view.fba} rawValue={String(view.fba)} ariaLabel="FBA-Code" />
-              </div>
+            <div style={{ padding: '28px 32px' }}>
+              <BetaBigCopy value={view.fba} rawValue={String(view.fba)} ariaLabel="FBA-Code" />
               <div style={{
                 marginTop: 4,
                 display: 'flex',
@@ -2459,12 +2453,13 @@ function BetaPruefen() {
               <div style={{ marginTop: 18 }}>
                 <BetaMetricsLine stats={stats} />
               </div>
-            </BetaWhitePanel>
+            </div>
 
             {/* Preflight nested as a second white panel inside the same
                 paper-island, so worker sees FBA-Identity and Hinweise as
-                one structural block. */}
-            {hasHinweise && (
+                one structural block. When everything passes, render a
+                compact «Alles validiert» eyebrow in this same slot. */}
+            {hasHinweise ? (
               <BetaHinweiseCard
                 naked
                 hinweise={hinweise}
@@ -2473,22 +2468,85 @@ function BetaPruefen() {
                 onAckAll={ackAll}
                 onJumpToPallet={handleJumpToPallet}
               />
+            ) : (
+              <BetaWhitePanel padding="16px 20px">
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 14,
+                  position: 'relative',
+                }}>
+                  {/* Green «seal» — circular check with soft halo */}
+                  <span style={{
+                    flexShrink: 0,
+                    width: 38,
+                    height: 38,
+                    borderRadius: '50%',
+                    background: T.status.success.bg,
+                    color: T.status.success.text,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: `0 0 0 1px ${T.status.success.border}, 0 0 0 6px ${T.status.success.bg}`,
+                  }}>
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+                      <path d="M4 9.5l3.2 3.2L14 6"
+                            stroke="currentColor" strokeWidth="2"
+                            strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </span>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+                    <span style={{
+                      fontSize: 14,
+                      fontWeight: 600,
+                      color: T.text.primary,
+                      letterSpacing: '-0.005em',
+                      lineHeight: 1.2,
+                    }}>
+                      Auftrag geprüft
+                    </span>
+                    <span style={{
+                      fontFamily: T.font.mono,
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      color: T.status.success.text,
+                      letterSpacing: '0.10em',
+                      textTransform: 'uppercase',
+                    }}>
+                      Keine Hinweise · Bereit für Focus
+                    </span>
+                  </div>
+
+                  <span style={{ flex: 1 }} />
+
+                  {/* Subtle mono timestamp — "validated now" stamp feeling */}
+                  <span style={{
+                    fontFamily: T.font.mono,
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    color: T.text.faint,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                  }}>
+                    ✓ Clean
+                  </span>
+                </div>
+              </BetaWhitePanel>
             )}
           </BetaPaperCard>
         </div>
 
         {/* ── PALETTEN ─────────────────────────────────────────────── */}
         <div style={{ animation: 'mp-prf-rise 480ms cubic-bezier(0.16,1,0.3,1) 140ms backwards' }}>
-          <BetaPaperCard>
-            <BetaWhitePanel padding="18px 24px">
+          <BetaPaperCard flat>
+            <div style={{ padding: '18px 24px' }}>
               <div style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: 12,
                 flexWrap: 'wrap',
               }}>
-                <BetaEyebrow>Paletten · {view.pallets.length}</BetaEyebrow>
-                <span style={{ flex: 1 }} />
                 <BetaSearchInput
                   value={searchQuery}
                   onChange={setSearchQuery}
@@ -2518,10 +2576,10 @@ function BetaPruefen() {
                         : `${visiblePallets.length} mit Hinweisen · ${hiddenByFilter} ausgeblendet`)}
                 </div>
               )}
-            </BetaWhitePanel>
+            </div>
 
             {visiblePallets.length === 0 ? (
-              <BetaWhitePanel padding="32px 24px">
+              <div style={{ padding: '32px 24px' }}>
                 <div style={{
                   textAlign: 'center',
                   fontSize: 13,
@@ -2531,14 +2589,14 @@ function BetaPruefen() {
                 }}>
                   {problemOnly ? '✓ Keine problematischen Paletten' : `Keine Treffer für "${searchQuery}"`}
                 </div>
-              </BetaWhitePanel>
+              </div>
             ) : (
               visiblePallets.map((p) => {
                 const raw = enrichedPallets.find((r) => r.id === p.id);
                 const eskuAssigned = sortItemsForPallet(eskuDist[p.id] || []);
                 const palletState = palletStates[p.id];
                 return (
-                  <BetaWhitePanel key={p.id} padding="18px 22px">
+                  <div key={p.id} style={{ padding: '18px 22px' }}>
                     <BetaPalletBlock
                       pallet={p}
                       palletNumber={raw?.number}
@@ -2546,7 +2604,7 @@ function BetaPruefen() {
                       eskuAssigned={eskuAssigned}
                       palletState={palletState}
                     />
-                  </BetaWhitePanel>
+                  </div>
                 );
               })
             )}
@@ -2596,17 +2654,17 @@ function BetaPruefenStyles() {
   );
 }
 
-function BetaPaperCard({ children }) {
+function BetaPaperCard({ children, flat = false }: { children?: React.ReactNode; flat?: boolean }) {
   return (
     <div style={{
       padding: 8,
       background: '#F4F5F7',
       border: '2px solid #FFFFFF',
       borderRadius: 32,
-      boxShadow: '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
+      boxShadow: flat ? 'none' : '0 0 89.7px 0 rgba(0, 0, 0, 0.05)',
       display: 'flex',
       flexDirection: 'column',
-      gap: 8,
+      gap: 14,
     }}>
       {children}
     </div>
@@ -2635,8 +2693,8 @@ function BetaEyebrow({ children, color, icon }: { children?: React.ReactNode; co
       fontWeight: 700,
       fontFamily: T.font.mono,
       color: color || T.text.faint,
-      textTransform: 'uppercase',
       letterSpacing: '0.18em',
+      textTransform: 'uppercase',
     }}>
       {icon}
       <span>{children}</span>
@@ -2751,8 +2809,7 @@ function BetaBigCopy({ value, rawValue, ariaLabel }: { value: React.ReactNode; r
           fontWeight: 600,
           color: T.status.success.text,
           letterSpacing: '0.10em',
-          textTransform: 'uppercase',
-        }}>
+            }}>
           ✓ Kopiert
         </span>
       )}
@@ -2790,16 +2847,6 @@ function BetaPalletBlock({ pallet, palletNumber, items, eskuAssigned, palletStat
         paddingTop: 4,
       }}>
         <PalletStackViz palletState={palletState} size="mini" radius={14} />
-        <span style={{
-          fontFamily: T.font.mono,
-          fontSize: 10.5,
-          fontWeight: 600,
-          color: T.text.faint,
-          letterSpacing: '0.04em',
-          fontVariantNumeric: 'tabular-nums',
-        }}>
-          {fillPct}%
-        </span>
       </div>
 
       {/* Right column — header + article list */}
@@ -2831,8 +2878,7 @@ function BetaPalletBlock({ pallet, palletNumber, items, eskuAssigned, palletStat
               color: meta.text,
               borderRadius: 999,
               letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-            }}>
+                    }}>
               L{lvl} {meta.shortName || meta.name}
             </span>
           )}
@@ -2843,22 +2889,11 @@ function BetaPalletBlock({ pallet, palletNumber, items, eskuAssigned, palletStat
               fontWeight: 700,
               color: T.status.warn.text,
               letterSpacing: '0.14em',
-              textTransform: 'uppercase',
-            }}>
+                    }}>
               4-Seiten-Warnung
             </span>
           )}
           <span style={{ flex: 1 }} />
-          <span style={{
-            fontFamily: T.font.mono,
-            fontSize: 11,
-            fontWeight: 500,
-            color: T.text.faint,
-            fontVariantNumeric: 'tabular-nums',
-            letterSpacing: '0.04em',
-          }}>
-            {totalArticles} Art · {totalUnits} Stk
-          </span>
         </div>
 
         {/* Article list — mirrors Focus item ordering:
@@ -2885,7 +2920,7 @@ function BetaPalletBlock({ pallet, palletNumber, items, eskuAssigned, palletStat
               padding: 0,
               display: 'flex',
               flexDirection: 'column',
-              gap: 6,
+              gap: 8,
             }}>
               {ordered.map(({ it, isEsku }, j) => (
                 <BetaArticleRow key={`${isEsku ? 'e' : 'm'}-${j}`} item={it} pos={j + 1} isEsku={isEsku} />
@@ -2898,25 +2933,31 @@ function BetaPalletBlock({ pallet, palletNumber, items, eskuAssigned, palletStat
   );
 }
 
-function BetaArticleRow({ item, pos, isEsku = false }) {
+function BetaArticleRow({ item, pos: _pos, isEsku = false }) {
   const lvl = getDisplayLevel(item) || item.level || 1;
   const meta = LEVEL_META[lvl] || LEVEL_META[1];
   const units = item.units;
   const esku = isEsku || item.isEinzelneSku === true;
+  const lvlShort = meta.shortName || meta.name || '';
   const [expanded, setExpanded] = useState(false);
+  const [hover, setHover] = useState(false);
 
   return (
     <li style={{
       listStyle: 'none',
-      background: esku ? T.accent.bg : '#FFFFFF',
+      background: '#FFFFFF',
       borderRadius: 14,
       overflow: 'hidden',
+      boxShadow: esku ? `inset 0 0 0 1px ${T.accent.border}` : 'none',
+      transition: 'box-shadow 160ms ease',
     }}>
       <div
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
@@ -2924,165 +2965,151 @@ function BetaArticleRow({ item, pos, isEsku = false }) {
           }
         }}
         style={{
+          /* 5 columns:
+             [LEVEL · ESKU marker] [TITLE flex] [COUNT mono] [CODE mono subtle] [chevron]
+             Single row — every column on a predictable rhythm. */
           display: 'grid',
-          gridTemplateColumns: '34px 38px 64px minmax(80px, auto) 1fr minmax(120px, auto) 16px',
+          gridTemplateColumns: 'auto minmax(0, 1fr) auto auto 12px',
           alignItems: 'center',
-          gap: 12,
-          padding: '11px 14px',
+          gap: 18,
+          padding: '12px 16px 12px 14px',
           cursor: 'pointer',
+          background: hover ? 'rgba(15, 23, 42, 0.022)' : 'transparent',
+          transition: 'background 140ms ease',
         }}
       >
-        {/* Position number */}
+        {/* LEVEL marker — colored dot + level shortname + ESKU pill when applicable.
+            Dot encodes level color identity; text gives category context.
+            ESKU pill prepended in accent for instant recognition. */}
         <span style={{
-          fontFamily: T.font.mono,
-          fontSize: 11,
-          fontWeight: 500,
-          color: T.text.faint,
-          fontVariantNumeric: 'tabular-nums',
-          textAlign: 'right',
-        }}>
-          {String(pos).padStart(2, '0')}
-        </span>
-
-        {/* ESKU badge — visible marker for Einzelne-SKU rows */}
-        {esku ? (
-          <span style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '2px 6px',
-            background: T.accent.main,
-            color: '#FFFFFF',
-            fontFamily: T.font.mono,
-            fontSize: 9.5,
-            fontWeight: 800,
-            letterSpacing: '0.1em',
-            borderRadius: 4,
-            justifySelf: 'start',
-          }}>
-            ESKU
-          </span>
-        ) : <span />}
-
-        {/* Units */}
-        <span
-          title={units != null ? `${units} Stück` : 'Menge nicht erkannt'}
-          style={{
-            fontFamily: T.font.mono,
-            fontSize: 12,
-            fontWeight: 600,
-            color: units != null ? T.text.primary : T.text.faint,
-            fontVariantNumeric: 'tabular-nums',
-            textAlign: 'right',
-          }}
-        >
-          {units != null ? `× ${units}` : '—'}
-        </span>
-
-        {/* Level pill */}
-        <span style={{
-          fontFamily: T.font.mono,
-          fontSize: 10.5,
-          fontWeight: 600,
-          padding: '2px 8px',
-          background: meta.bg,
-          color: meta.text,
-          borderRadius: 999,
-          letterSpacing: '0.06em',
-          textTransform: 'uppercase',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
           justifySelf: 'start',
-          whiteSpace: 'nowrap',
+          minWidth: 0,
         }}>
-          L{lvl} {meta.shortName || meta.name}
+          {esku && (
+            <span style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '1.5px 6px',
+              background: T.accent.main,
+              color: '#FFFFFF',
+              fontFamily: T.font.mono,
+              fontSize: 9,
+              fontWeight: 800,
+              letterSpacing: '0.12em',
+              borderRadius: 3,
+            }}>
+              ESKU
+            </span>
+          )}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+            <span aria-hidden style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: meta.color,
+              flexShrink: 0,
+            }} />
+            <span style={{
+              fontFamily: T.font.mono,
+              fontSize: 10.5,
+              fontWeight: 600,
+              color: T.text.subtle,
+              letterSpacing: '0.04em',
+              whiteSpace: 'nowrap',
+            }}>
+              L{lvl}{lvlShort ? ` ${lvlShort}` : ''}
+            </span>
+          </span>
         </span>
 
-        {/* Title — single line truncate */}
+        {/* TITLE — primary visual anchor, single-line truncate */}
         <span
           title={item.title || ''}
           style={{
-            fontSize: 13,
-            fontWeight: 400,
+            fontSize: 13.5,
+            fontWeight: 500,
             color: T.text.primary,
-            letterSpacing: '-0.005em',
+            letterSpacing: '-0.008em',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
+            minWidth: 0,
           }}
         >
           {formatItemTitle(item.title || '—')}
         </span>
 
-        {/* Code — ESKU shows sku + fnsku stacked; Mixed shows single code line */}
-        {isEsku || item.isEinzelneSku ? (
-          <span
-            title={[item.sku, item.fnsku].filter(Boolean).join(' · ') || ''}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'flex-end',
-              gap: 2,
-              minWidth: 0,
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontFamily: T.font.mono,
-              fontSize: 12,
-              fontWeight: 600,
-              color: T.text.primary,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              maxWidth: '100%',
-            }}>
-              {item.sku || item.fnsku || '—'}
-            </span>
-            {item.sku && item.fnsku && item.fnsku !== item.sku && (
-              <span style={{
+        {/* COUNT — bold numeric, muted × glyph */}
+        <span
+          title={units != null ? `${units} Stück` : 'Menge nicht erkannt'}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'baseline',
+            gap: 3,
+            fontFamily: T.font.mono,
+            fontVariantNumeric: 'tabular-nums',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {units != null ? (
+            <>
+              <span style={{ color: T.text.faint, fontSize: 11, fontWeight: 500 }}>×</span>
+              <span style={{ color: T.text.primary, fontSize: 13, fontWeight: 600 }}>
+                {units.toLocaleString('de-DE')}
+              </span>
+            </>
+          ) : (
+            <span style={{ color: T.text.faint, fontSize: 12 }}>—</span>
+          )}
+        </span>
+
+        {/* CODE — single line, identical treatment for ESKU + Mixed so
+            row height stays predictable. Most-identifying code shown:
+            ESKU → fnsku (Amazon barcode); Mixed → useItem/code.
+            Secondary codes still discoverable via hover tooltip + expand. */}
+        {(() => {
+          const code = esku
+            ? (item.fnsku || item.sku || '—')
+            : (item.code || item.useItem || item.fnsku || '—');
+          const tooltip = [item.fnsku, item.sku, item.useItem, item.ean].filter(Boolean).join(' · ');
+          return (
+            <span
+              title={tooltip || ''}
+              style={{
                 fontFamily: T.font.mono,
-                fontSize: 10.5,
+                fontSize: 11.5,
+                fontWeight: 500,
                 color: T.text.faint,
-                letterSpacing: '0.02em',
+                textAlign: 'right',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
-                maxWidth: '100%',
-              }}>
-                {item.fnsku}
-              </span>
-            )}
-          </span>
-        ) : (
-          <span
-            title={item.code || item.useItem || item.fnsku || ''}
-            style={{
-              fontFamily: T.font.mono,
-              fontSize: 12,
-              color: T.text.subtle,
-              textAlign: 'right',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {item.code || item.useItem || item.fnsku || '—'}
-          </span>
-        )}
+                letterSpacing: '0.01em',
+              }}
+            >
+              {code}
+            </span>
+          );
+        })()}
 
-        {/* Expand chevron */}
+        {/* CHEVRON — subtle, rotates on expand; brightens on hover */}
         <span
           aria-hidden
           style={{
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: T.text.faint,
+            color: hover || expanded ? T.text.subtle : T.text.faint,
             transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-            transition: 'transform 180ms cubic-bezier(0.16,1,0.3,1)',
+            transition: 'transform 200ms cubic-bezier(0.16,1,0.3,1), color 160ms ease',
           }}
         >
-          <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
-            <path d="M2 1l4 3.5-4 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          <svg width="8" height="8" viewBox="0 0 9 9" fill="none">
+            <path d="M2 1l4 3.5-4 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </span>
       </div>
@@ -3121,31 +3148,57 @@ function BetaArticleDetail({ item, level, meta, isEsku }) {
 
   return (
     <div style={{
-      padding: '12px 18px 14px 18px',
+      padding: '14px 18px 16px 18px',
       borderTop: `1px dashed ${T.border.subtle}`,
       display: 'flex',
       flexDirection: 'column',
-      gap: 12,
+      gap: 14,
       animation: 'mp-prf-rise 220ms cubic-bezier(0.16,1,0.3,1)',
     }}>
-      <BetaDetailField label="Titel" value={item.title || '—'} multiline />
+      {/* Title — full, no label (context is the article row above) */}
+      {item.title && (
+        <p style={{
+          margin: 0,
+          fontSize: 13,
+          lineHeight: 1.5,
+          color: T.text.secondary,
+          letterSpacing: '-0.005em',
+        }}>
+          {item.title}
+        </p>
+      )}
 
+      {/* Codes — single mono line with subtle inline labels */}
       {visibleCodes.length > 0 && (
         <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-          gap: '8px 18px',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '6px 18px',
+          fontFamily: T.font.mono,
+          fontSize: 12,
         }}>
           {visibleCodes.map(([k, v]) => (
-            <BetaDetailField key={k} label={k} value={String(v)} mono />
+            <span key={k} style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6 }}>
+              <span style={{
+                color: T.text.faint,
+                fontSize: 10.5,
+                letterSpacing: '0.08em',
+              }}>
+                {k}
+              </span>
+              <span style={{
+                color: T.text.primary,
+                fontWeight: 500,
+                wordBreak: 'break-all',
+              }}>
+                {String(v)}
+              </span>
+            </span>
           ))}
         </div>
       )}
 
-      {item.dimStr && (
-        <BetaDetailField label="Maße" value={item.dimStr} mono />
-      )}
-
+      {/* Bottom chips — level + dimensions + count + flags inline */}
       <div style={{
         display: 'flex',
         flexWrap: 'wrap',
@@ -3156,6 +3209,9 @@ function BetaArticleDetail({ item, level, meta, isEsku }) {
           <span style={{ width: 6, height: 6, background: meta.color, borderRadius: 2, marginRight: 5 }} />
           L{level} {meta.name}
         </BetaDetailPill>
+        {item.dimStr && (
+          <BetaDetailPill>{item.dimStr}</BetaDetailPill>
+        )}
         {item.units != null && !isEsku && (
           <BetaDetailPill>× {item.units.toLocaleString('de-DE')} Stück</BetaDetailPill>
         )}
@@ -3183,8 +3239,7 @@ function BetaDetailField({ label, value, mono, multiline }: any) {
         fontWeight: 600,
         color: T.text.faint,
         letterSpacing: '0.14em',
-        textTransform: 'uppercase',
-        marginBottom: 3,
+          marginBottom: 3,
       }}>
         {label}
       </div>
@@ -3353,8 +3408,7 @@ function BetaMetric({ value, label }) {
       <span style={{
         fontSize: 10.5,
         color: T.text.faint,
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
+          letterSpacing: '0.08em',
         fontFamily: T.font.mono,
         fontWeight: 600,
       }}>
@@ -3382,7 +3436,7 @@ function BetaSearchInput({ value, onChange, placeholder }) {
       alignItems: 'center',
       gap: 8,
       padding: '8px 14px',
-      background: '#F4F5F7',
+      background: '#FFFFFF',
       borderRadius: 999,
       minWidth: 240,
     }}>
@@ -3430,7 +3484,7 @@ function BetaSearchInput({ value, onChange, placeholder }) {
         fontSize: 10.5,
         fontWeight: 600,
         color: T.text.faint,
-        background: '#FFFFFF',
+        background: '#F4F5F7',
         borderRadius: 4,
         padding: '2px 6px',
         letterSpacing: '0.04em',
@@ -3453,7 +3507,7 @@ function BetaFilterChip({ active, onClick, children }) {
         alignItems: 'center',
         gap: 7,
         padding: '8px 14px',
-        background: active ? T.accent.bg : '#F4F5F7',
+        background: active ? T.accent.bg : '#FFFFFF',
         borderRadius: 999,
         fontFamily: T.font.ui,
         fontSize: 12.5,
@@ -3479,18 +3533,26 @@ function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet,
     hinweise.high.length > 0 ? 'high'
     : hinweise.medium.length > 0 ? 'medium'
     : 'low';
+  /* Only-info state (no high/medium) is non-alarming — paint the panel
+     with a soft green tint to signal «nothing wrong, just advisory». */
+  const onlyInfo = worstSev === 'low';
   const sevColor = worstSev === 'high' ? T.status.danger.text
     : worstSev === 'medium' ? T.status.warn.text
-    : T.text.subtle;
+    : T.status.success.text;
   const sevIcon = worstSev === 'high' ? <BetaXIcon />
     : worstSev === 'medium' ? <BetaWarnIcon />
-    : null;
+    : <BetaCheckIcon />;
 
   const hasUnackedAckable = hinweise.rows.some((r) => r.ackable && !acked.has(r.ackKey || ''));
   const [open, setOpen] = useState(false);
 
   const inner = (
-    <BetaWhitePanel padding="18px 22px">
+    <div style={{
+      background: '#FFFFFF',
+      borderRadius: 24,
+      padding: '18px 22px',
+      boxShadow: onlyInfo ? `inset 0 0 0 1px ${T.status.success.border}` : 'none',
+    }}>
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
@@ -3598,7 +3660,7 @@ function BetaHinweiseCard({ hinweise, acked, onAckOne, onAckAll, onJumpToPallet,
             )}
           </>
         )}
-      </BetaWhitePanel>
+      </div>
   );
   return naked ? inner : <BetaPaperCard>{inner}</BetaPaperCard>;
 }
@@ -3637,8 +3699,7 @@ function BetaHinweiseGroup({ label, color, rows, acked, onAckOne, onJumpToPallet
         fontSize: 10,
         fontWeight: 700,
         color,
-        textTransform: 'uppercase',
-        letterSpacing: '0.16em',
+          letterSpacing: '0.16em',
         marginBottom: 8,
       }}>
         {label} · {rows.length}
@@ -3733,8 +3794,7 @@ function BetaHinweiseRow({ row, isAcked, onAck, onJumpToPallet }) {
               fontFamily: T.font.mono,
               color: T.status.success.text,
               letterSpacing: '0.08em',
-              textTransform: 'uppercase',
-            }}>
+                    }}>
               <BetaCheckIcon /> Akzeptiert
             </span>
           ) : (
@@ -3768,7 +3828,7 @@ function BetaFocusPill({ isBlocked, stats, unackedHigh, validErrors, onStartFocu
     ? `${validErrors} Fehler — Validierung nötig`
     : unackedHigh > 0
       ? `${unackedHigh} Hinweis${unackedHigh === 1 ? '' : 'e'} offen`
-      : `Bereit · ${stats.palletCount} Pal · ${stats.articles} Art`;
+      : 'Bereit';
   return (
     <div style={{
       position: 'fixed',

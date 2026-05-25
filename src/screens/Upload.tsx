@@ -2037,7 +2037,7 @@ function BetaUploadView({
   return (
     <Page>
       <main style={{
-        maxWidth: 720,
+        maxWidth: 960,
         margin: '0 auto',
         padding: '32px 32px',
         display: 'flex',
@@ -2072,15 +2072,24 @@ function BetaUploadView({
           }}
         >
           <div style={{
+            position: 'relative',
             background: state === 'drag-over' ? T.accent.bg : '#FFFFFF',
             borderRadius: 24,
-            padding: '44px 44px',
-            boxShadow: ringColor ? `inset 0 0 0 2px ${ringColor}` : 'none',
+            padding: '96px 64px',
+            boxShadow: ringColor
+              ? `inset 0 0 0 2px ${ringColor}`
+              : state === 'idle'
+                ? 'inset 0 0 0 1px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.02)'
+                : 'none',
+            backgroundImage: state === 'idle'
+              ? 'radial-gradient(ellipse 60% 50% at 50% 0%, rgba(99, 102, 241, 0.04), transparent 70%)'
+              : 'none',
             transition: 'background 240ms ease, box-shadow 240ms ease',
-            minHeight: 260,
+            minHeight: 460,
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'center',
+            overflow: 'hidden',
           }}>
             <BetaUploadBody
               state={state}
@@ -2194,21 +2203,38 @@ function BetaIdleBody({ onPick, isOffline, dragging = false }: { onPick: () => v
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      gap: 16,
+      gap: 14,
       textAlign: 'center',
     }}>
-      <div style={{
-        transform: dragging ? 'scale(1.1)' : 'scale(1)',
-        transition: 'transform 240ms cubic-bezier(0.16, 1, 0.3, 1)',
+      {/* File-type chip — gives the form a clear identity */}
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '5px 11px 5px 9px',
+        background: '#F4F5F7',
+        border: '1px solid rgba(15, 23, 42, 0.06)',
+        borderRadius: 999,
+        fontFamily: T.font.mono,
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: T.text.subtle,
+        letterSpacing: '0.10em',
+        textTransform: 'uppercase',
       }}>
-        <BetaDropIcon size={56} color={dragging ? 'var(--accent)' : T.text.faint} />
-      </div>
-      <BetaEyebrow>{isOffline ? 'Offline' : 'Auftrag laden'}</BetaEyebrow>
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path d="M3 1.5h4l2 2V10a.5.5 0 01-.5.5h-5.5A.5.5 0 012.5 10V2a.5.5 0 01.5-.5z"
+                stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M7 1.5V4h2" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+        </svg>
+        Lagerauftrag · .docx
+      </span>
+
       <h1 style={{
         margin: 0,
-        fontSize: 'clamp(24px, 2.8vw, 32px)',
+        fontSize: 'clamp(26px, 3vw, 34px)',
         fontWeight: 600,
-        letterSpacing: '-0.018em',
+        letterSpacing: '-0.022em',
         lineHeight: 1.1,
         color: T.text.primary,
       }}>
@@ -2216,25 +2242,41 @@ function BetaIdleBody({ onPick, isOffline, dragging = false }: { onPick: () => v
       </h1>
       <p style={{
         margin: 0,
-        fontSize: 13,
+        fontSize: 13.5,
         color: T.text.subtle,
         maxWidth: 420,
+        lineHeight: 1.5,
       }}>
         {isOffline
           ? 'Server offline — Backend nicht erreichbar.'
-          : '.docx-Datei hierher ziehen oder klicken'}
+          : 'Datei hierher ziehen oder über die Schaltfläche auswählen.'}
       </p>
       {!isOffline && (
-        <>
+        <div style={{
+          marginTop: 10,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 12,
+        }}>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onPick(); }}
-            style={betaAccentPillStyle}
-            onMouseEnter={betaAccentPillHover}
-            onMouseLeave={betaAccentPillLeave}
+            style={betaAiryPickStyle}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'none';
+            }}
           >
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+              <path d="M7 9.5V2.5M7 2.5L4.25 5.25M7 2.5l2.75 2.75"
+                    stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M2.5 9.5v1.25c0 .69.56 1.25 1.25 1.25h6.5c.69 0 1.25-.56 1.25-1.25V9.5"
+                    stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
             Datei wählen
-            <BetaKbd>O</BetaKbd>
           </button>
           <span style={{
             fontFamily: T.font.mono,
@@ -2246,11 +2288,29 @@ function BetaIdleBody({ onPick, isOffline, dragging = false }: { onPick: () => v
           }}>
             oder Strg + V einfügen
           </span>
-        </>
+        </div>
       )}
     </div>
   );
 }
+
+const betaAiryPickStyle: React.CSSProperties = {
+  all: 'unset',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '11px 22px',
+  background: '#FFFFFF',
+  color: T.text.primary,
+  border: '1px solid rgba(15, 23, 42, 0.08)',
+  borderRadius: 999,
+  fontFamily: T.font.ui,
+  fontSize: 13.5,
+  fontWeight: 600,
+  letterSpacing: '-0.005em',
+  cursor: 'pointer',
+  transition: 'transform 200ms cubic-bezier(0.16, 1, 0.3, 1)',
+};
 
 /* ── PARSING body ───────────────────────────────────────────────────── */
 function BetaParsingBody({ batch }) {

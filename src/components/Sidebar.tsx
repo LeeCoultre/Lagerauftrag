@@ -46,8 +46,20 @@ function useCollapsedSidebar(): [boolean, React.Dispatch<React.SetStateAction<bo
 /* ─── Groups ────────────────────────────────────────────────────────
    Sub-text was removed — Linear-style nav lives by the label alone.
    The hover-peek tooltip in collapsed mode shows the long form. */
-function buildGroups({ current, queue, history, me }) {
+function buildGroups({ current, queue, history, me, beta }) {
   return [
+    /* Beta-only entry — sits above all groups, no section label, custom
+       brand icon. Hidden entirely when beta is off so classic mode stays
+       byte-identical. */
+    beta && {
+      id: 'lynne',
+      label: '',
+      items: [
+        { id: 'lynne-table', label: 'LYNNE Table',
+          peek: 'Beta · neu',
+          icon: <IconLynneTable /> },
+      ],
+    },
     {
       id: 'work',
       label: 'Work',
@@ -93,15 +105,15 @@ function buildGroups({ current, queue, history, me }) {
           icon: <IconAdmin /> },
       ].filter(Boolean),
     },
-  ];
+  ].filter(Boolean);
 }
 
 export function Sidebar({ route, onRoute, onOpenCommand }) {
   const { queue, history, current } = useAppState();
   const me = useMe().data;
   const [collapsed, setCollapsed] = useCollapsedSidebar();
-  const groups = buildGroups({ current, queue, history, me });
   const { beta } = useBetaDesign();
+  const groups = buildGroups({ current, queue, history, me, beta });
 
   const width = collapsed ? SIZES.collapsed : SIZES.expanded;
 
@@ -163,7 +175,10 @@ export function Sidebar({ route, onRoute, onOpenCommand }) {
 
       <div style={{ flex: 1, minHeight: 0 }} />
 
-      {current && (
+      {/* CurrentProgress hidden in beta-design: workflow status now
+          lives entirely on the workspace surface (BetaIslandBar, hero
+          chips). Classic-mode keeps the sidebar card unchanged. */}
+      {current && !beta && (
         <CurrentProgress
           current={current}
           collapsed={collapsed}
@@ -459,7 +474,7 @@ function NavGroup({ label, isFirst, collapsed, children }) {
       gap: 1,
       paddingTop: isFirst ? 0 : 14,
     }}>
-      {!collapsed && (
+      {!collapsed && label && (
         <div style={{
           padding: '2px 14px 6px',
           fontSize: 10.5,
@@ -1163,6 +1178,21 @@ function IconSettings() {
       <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.3"/>
       <path d="M8 1.5v1.6M8 12.9v1.6M14.5 8h-1.6M3.1 8H1.5M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1M12.6 12.6l-1.1-1.1M4.5 4.5L3.4 3.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
     </svg>
+  );
+}
+
+function IconLynneTable() {
+  /* Photographic brand icon — escapes the stroke-only icon grammar on
+     purpose so the LYNNE Table entry reads as a distinct app-level
+     destination, not a sibling of Workflow/Suche/etc. */
+  return (
+    <img
+      src="/brand/lynne-table.png"
+      alt=""
+      width={18}
+      height={18}
+      style={{ display: 'block', borderRadius: 4 }}
+    />
   );
 }
 

@@ -28,14 +28,14 @@
    Persistence: copiedKeys is server-backed via /api/auftraege/.../
    progress copied_keys JSONB. Reload no longer wipes chip state. */
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppState } from '@/state.jsx';
 import {
   focusItemView, sortItemsForPallet, distributeEinzelneSku, applyEskuOverrides, eskuOverrideKey,
   enrichItemDims, getDisplayLevel, LEVEL_META, formatItemTitle,
-  extractProduktionPerCarton, singleSkuClusterKey, itemTotalVolumeCm3, largeBaseRank,
-  PALLET_VOL_CM3, cartonShapeMm,
+  extractProduktionPerCarton, singleSkuClusterKey, itemTotalVolumeCm3, itemTotalWeightKg, largeBaseRank,
+  PALLET_VOL_CM3, cartonShapeMm, computePalletIntensityProfile,
 } from '@/utils/auftragHelpers.js';
 import { lookupSkuDimensions } from '@/marathonApi.js';
 import { detectWiederholt } from '@/utils/wiederholtLogic.js';
@@ -659,82 +659,48 @@ export default function FocusScreen() {
      bumps copiedKeysVersion which immediately re-derives this. */
   const codeCopied = copiedKeys.has(`${palletIdx}|${itemIdx}`);
 
-  /* Bottom-island hint — state-machine over current situation. Sits as
-     ghost-text left of «Artikel abschließen» and tells the worker the
-     literal next step. No clicks, no actions; just a steady signpost. */
-  const islandHint = useMemo<string | null>(() => {
-    if (!rawItem || !rawPallet) return null;
-    if (currentPalletCompletedIdxs.has(itemIdx)) {
-      return 'Artikel bereits abgeschlossen';
+  /* Bottom-island intensity profile — per-item composite workload
+     (units × volume × weight, normalized per-pallet) feeding the
+     smooth heat-curve in BetaIslandBar. `lastCompletedIdx` drives
+     the done-vs-pending opacity split inside the curve; `activeIdx`
+     positions the 1px whisper marker. `null` when the pallet has
+     fewer than 2 items (no curve to draw). */
+  const islandIntensity = useMemo(() => {
+    const items = rawPallet?.items || [];
+    if (items.length < 2) return null;
+    const profile = computePalletIntensityProfile(items);
+    let lastCompletedIdx = -1;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (currentPalletCompletedIdxs.has(i)) { lastCompletedIdx = i; break; }
     }
-    if (!codeCopied) {
-      const code = item?.code || rawItem?.fnsku || '';
-      return code ? `Scanne ${code}` : 'Code kopieren';
-    }
-    if (!isLastItemOfPallet) return 'Fertig — Space drücken';
-    if (!allPalletCopied) {
-      const n = missingCopies.length;
-      return `Noch ${n} Code${n === 1 ? '' : 's'} auf der Palette`;
-    }
-    const nextRawIdx = nextDisplayPalletRawIdx(palletIdx);
-    if (nextRawIdx == null) return 'Finale — Auftrag abschließen';
-    const nextId = rawPallets[nextRawIdx]?.id || '—';
-    return `Nächste Palette: ${nextId}`;
-  }, [rawItem, rawPallet, item, codeCopied, isLastItemOfPallet,
-      allPalletCopied, missingCopies, palletIdx, itemIdx,
-      rawPallets, currentPalletCompletedIdxs, nextDisplayPalletRawIdx]);
-
-  /* Predictive «Готов поспорить» pill — only fires on strong signals:
-       (A) currentWiederholt — same code on the NEXT pallet, ≥30 units
-       (B) run of ≥3 consecutive identical useItem articles ahead in
-           the current pallet
-     Click navigates to the predicted target. Anything weaker stays
-     silent so the worker doesn't learn to ignore it. */
-  const islandPrediction = useMemo<{ label: string; onClick: () => void } | null>(() => {
-    // Signal A — cross-pallet code repeat
-    if (currentWiederholt) {
-      const { code, palletId, units } = currentWiederholt;
-      return {
-        label: `${units}× ${palletId}`,
-        onClick: () => {
-          if (!allPalletCopied) { alert(blockMessage()); return; }
-          const nextRawIdx = rawPallets.findIndex((p) => p.id === palletId);
-          if (nextRawIdx < 0) return;
-          const targetIdx = rawPallets[nextRawIdx].items.findIndex(
-            (it) => (it.useItem || it.fnsku) === code,
-          );
-          if (targetIdx < 0) return;
-          if (nextRawIdx > palletIdx) {
-            setInterlude(buildInterludePayload(palletIdx));
-          }
-          setCurrentPalletIdx(nextRawIdx);
-          setTimeout(() => setCurrentItemIdx(targetIdx), 0);
-        },
-      };
-    }
-    // Signal B — same-useItem run ahead in the current pallet
-    const curCode = rawItem?.useItem || rawItem?.fnsku;
-    if (curCode && rawPallet) {
-      let last = itemIdx;
-      for (let i = itemIdx + 1; i < rawPallet.items.length; i++) {
-        const it = rawPallet.items[i];
-        const code = it?.useItem || it?.fnsku;
-        if (code === curCode) last = i;
-        else break;
-      }
-      const runLen = last - itemIdx + 1;
-      if (runLen >= 3) {
-        return {
-          label: `${runLen - 1}× gleiches SKU folgt`,
-          onClick: () => { setCurrentItemIdx(itemIdx + 1); },
-        };
-      }
-    }
-    return null;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentWiederholt, rawItem, rawPallet, palletIdx, itemIdx,
-      rawPallets, allPalletCopied, setCurrentPalletIdx, setCurrentItemIdx,
-      setInterlude, buildInterludePayload]);
+    /* Per-item rows fuel the expanded detail panel — same units / volume
+       / weight signals that feed computePalletIntensityProfile, plus the
+       completion + active flags so the panel can echo workflow state. */
+    const details = items.map((it, i) => ({
+      title:       parseMinimalTitle(it?.name || it?.title || '—'),
+      /* Per-package content — what's inside ONE Karton/Einheit. Mirrors
+         the perCarton field the hero card computes (ArticleColumn) so
+         the tray and hero stay in sync. Empty string when no value is
+         available (e.g., ESKU without packsPerCarton). */
+      perPackage:  packageContentString(it),
+      units:       Math.max(0, Number(it?.units) || 0),
+      volCm3:      Math.max(0, itemTotalVolumeCm3(it) || 0),
+      weightKg:    Math.max(0, itemTotalWeightKg(it) || 0),
+      intensity:   profile.values[i] ?? 0,
+      level:       it?.level || getDisplayLevel(it) || 1,
+      isEsku:      !!(it?.isEinzelneSku || it?.isEsku),
+      isCompleted: currentPalletCompletedIdxs.has(i),
+      isActive:    i === itemIdx,
+    }));
+    return {
+      values: profile.values,
+      hasVariance: profile.hasVariance,
+      activeIdx: itemIdx,
+      lastCompletedIdx,
+      palletShortId: shortPalletId(rawPallet),
+      details,
+    };
+  }, [rawPallet, itemIdx, currentPalletCompletedIdxs]);
 
   /* Wiederholt: no auto-dismiss. Worker must explicitly click "OK" so
      the warning can't disappear before being acknowledged (the whole
@@ -810,6 +776,16 @@ export default function FocusScreen() {
       if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         toggleSchnell();
+        return;
+      }
+      /* P — quick toggle back to Prüfen. Mirrors Pruefen's "F" hotkey
+         which forwards into Focus, giving the worker a one-key round-trip
+         between the two live workflow steps. Always available (gated
+         only by overlays), so the worker doesn't have to engage Shell
+         mode just to peek at the layout. */
+      if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        goToStep('pruefen');
         return;
       }
       if (zen && e.key === 'Escape') {
@@ -950,8 +926,8 @@ export default function FocusScreen() {
         <BetaTopPill
           fba={fbaCode}
           startedAt={current?.startedAt}
-          onStorno={() => setStornoOpen(true)}
           onExit={onExit}
+          onGoToPruefen={() => goToStep('pruefen')}
         />
       ) : (
       <div style={{
@@ -1275,8 +1251,8 @@ export default function FocusScreen() {
           schnellmodus={schnellmodus}
           onToggleShell={toggleSchnell}
           onOpenList={() => setPalletListOpen(true)}
-          hint={islandHint}
-          prediction={islandPrediction}
+          onStorno={() => setStornoOpen(true)}
+          intensity={islandIntensity}
         />
       ) : (
         <FocusStickyBar
@@ -2037,6 +2013,100 @@ function simplifyItemTitle(name) {
   return out.trim();
 }
 
+/* packageContentString — extracts "what's inside ONE package" as a
+   short string for the intensity tray rows. Mirrors the perCarton
+   field built by ArticleColumn / FlowHero so the breakdown matches
+   the hero card vocabulary.
+     • Mixed (non-ESKU) with parsed count: `${rollen} ${rollenUnit || 'Rollen'}`
+     • ESKU items/pack:  `${eskuItemsPerPack} ${eskuContentLabel || 'Einheiten'}`
+     • ESKU packs/carton:`${eskuPacksPerCarton} Einheiten`
+     • fallback: `${units} Stk` — the order's carton/unit count. The
+       parser only sets `rollen` when the docx title spells it out
+       explicitly ("50 Rollen", "50 EC…"); many Thermo lines don't,
+       so this guarantees every row carries a quantity signal. */
+function packageContentString(it) {
+  if (!it) return '';
+  if (!it.isEinzelneSku && it.rollen) {
+    return `${it.rollen} ${it.rollenUnit || 'Rollen'}`;
+  }
+  if (it.isEinzelneSku) {
+    if (it.eskuItemsPerPack != null && it.units) {
+      return `${it.eskuItemsPerPack} ${it.eskuContentLabel || 'Einheiten'}`;
+    }
+    if (it.eskuPacksPerCarton != null) {
+      return `${it.eskuPacksPerCarton} Einheiten`;
+    }
+  }
+  const u = Number(it.units);
+  if (Number.isFinite(u) && u > 0) {
+    return `${u} Stk`;
+  }
+  return '';
+}
+
+/* parseMinimalTitle — FOCUSED parser dedicated to the BetaIslandBar
+   intensity tray. The worker is scanning a list to spot heavy/light
+   items at a glance — they only need (a) the product kind and (b) the
+   key distinguishing dimension. Everything else (SKU, brand, descriptor,
+   units, third dimension) is noise and gets stripped.
+
+   Output shape:
+     "<Product> <dim1×dim2>"   e.g. "Thermo 57×18"
+     "<Product>"                e.g. "Klebeband"
+     "<dim>"                    rare unmatched fallback
+     simplifyItemTitle(raw)     last resort for unrecognised products
+
+   Stable: same input → same output, no length variance, easy to scan. */
+const GRAPH_PRODUCT_MAP = [
+  [/thermo\s*rolle?n?/i,             'Thermo'],
+  [/tacho\s*rolle?n?/i,              'Tacho'],
+  [/(?:klebe|pack|paket)\s*band/i,   'Klebeband'],
+  [/kürbis(?:.*kern[öo]l)?/i,        'Kürbiskernöl'],
+  [/etikett/i,                       'Etikett'],
+  [/folie/i,                         'Folie'],
+  [/karton/i,                        'Karton'],
+];
+function parseMinimalTitle(raw) {
+  if (!raw) return '—';
+  let s = String(raw);
+  /* 1. Drop long digit runs — SKU/EAN/FNSKU never help quick scanning. */
+  s = s.replace(/\b\d{5,}\b/g, ' ');
+  /* 2. Drop parenthetical asides — "(Bruchgefahr)", "(unbedruckt)". */
+  s = s.replace(/\s*\([^)]*\)/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  /* 3. Product kind — first matching keyword wins, case-insensitive. */
+  let product = '';
+  for (const [re, label] of GRAPH_PRODUCT_MAP) {
+    if ((re as RegExp).test(s)) { product = label as string; break; }
+  }
+
+  /* 4. First two numeric components — these carry the differentiating
+        info between rows (57×18 vs 58×64 vs 80×80). Unit suffixes after
+        each number ("mm"/"m") are tolerated and dropped from the output. */
+  let dim = '';
+  const dim2 = s.match(/(\d+(?:[.,]\d+)?)\s*(?:mm|cm|m)?\s*[×xX]\s*(\d+(?:[.,]\d+)?)/);
+  if (dim2) {
+    dim = `${dim2[1]}×${dim2[2]}`;
+  } else {
+    /* Fallback single-quantity for products without × dimensions
+       (e.g. "1 l" for Kürbiskernöl). */
+    const dim1 = s.match(/(\d+(?:[.,]\d+)?)\s*(mm|cm|m|l|ml|kg|g)\b/i);
+    if (dim1) dim = `${dim1[1]}${dim1[2].toLowerCase()}`;
+  }
+
+  if (product && dim) return `${product} ${dim}`;
+  if (product)        return product;
+  if (dim)            return dim;
+
+  /* Last resort — unrecognised product, fall back to simplifyItemTitle
+     so the row still reads something useful instead of "—". Cap so
+     unfamiliar items don't blow up the row. */
+  const fallback = simplifyItemTitle(raw);
+  if (!fallback) return '—';
+  return fallback.length > 24 ? fallback.slice(0, 23).trimEnd() + '…' : fallback;
+}
+
 /* ── LEFT — article column ─────────────────────────────────────────── */
 function ArticleColumn({ item, zen = false }) {
   const perCarton = !item.isEsku
@@ -2430,12 +2500,14 @@ function FocusStickyBar({
    floating at the bottom of the viewport.
    ════════════════════════════════════════════════════════════════════════ */
 function BetaTopPill({
-  fba, startedAt, onStorno, onExit,
+  fba, startedAt, onExit, onGoToPruefen,
 }: {
   fba: string;
   startedAt?: number | null;
-  onStorno: () => void;
   onExit: () => void;
+  /* Optional back-to-Prüfen — when omitted the button is hidden so the
+     pill stays usable in any future caller that doesn't need it. */
+  onGoToPruefen?: () => void;
 }) {
   const [fbaCopied, setFbaCopied] = useState(false);
   useEffect(() => {
@@ -2476,22 +2548,77 @@ function BetaTopPill({
       top: 18,
       left: '50%',
       transform: 'translateX(-50%)',
+      /* Sidebar-aware centering — offset to the right by half the
+         sidebar width so the pill sits centred in the WORKSPACE area
+         (matching BetaIslandBar's bottom-of-viewport alignment). The
+         CSS variable updates when the sidebar collapses/expands; the
+         margin-left transition lets the pill slide in step with the
+         sidebar width animation. */
+      marginLeft: 'calc(var(--sidebar-width, 0px) / 2)',
+      transition: 'margin-left 240ms cubic-bezier(0.16, 1, 0.3, 1)',
       zIndex: 40,
       display: 'inline-flex',
       alignItems: 'center',
       gap: 8,
-      padding: '4px 4px 4px 16px',
+      padding: onGoToPruefen ? '4px 4px 4px 4px' : '4px 4px 4px 16px',
       background: '#F8F8F8',
       border: '2px solid #FFFFFF',
       borderRadius: 999,
       whiteSpace: 'nowrap',
     }}>
+      {/* Back-to-Prüfen — left-anchored navigation chip. Symmetric to
+          Pruefen's BetaFocusPill (which forwards to Focus): both screens
+          now offer a one-click toggle to the sibling step without
+          touching the workflow state. Hotkey: P. */}
+      {onGoToPruefen && (
+        <button
+          type="button"
+          onClick={onGoToPruefen}
+          title="Zurück zur Prüfen-Ansicht (P)"
+          aria-label="Zurück zu Prüfen"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            height: 32,
+            padding: '0 14px 0 11px',
+            fontSize: 12,
+            fontFamily: T.font.ui,
+            fontWeight: 600,
+            letterSpacing: '-0.005em',
+            color: T.text.primary,
+            background: chipBg,
+            border: 'none',
+            borderRadius: 999,
+            cursor: 'pointer',
+            transition: 'background 140ms, color 140ms, transform 200ms',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = T.accent.bg;
+            e.currentTarget.style.color = T.accent.text;
+            e.currentTarget.style.transform = 'translateX(-1px)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = chipBg;
+            e.currentTarget.style.color = T.text.primary;
+            e.currentTarget.style.transform = 'translateX(0)';
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+            <path d="M11 7H3m0 0l3.5-3.5M3 7l3.5 3.5" stroke="currentColor"
+                  strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Prüfen
+        </button>
+      )}
+
       {/* FBA — bare label + middot + click-to-copy code. No surrounding
           chip background; the outer wrapper carries the visual weight. */}
       <div style={{
         display: 'inline-flex',
         alignItems: 'center',
         gap: 8,
+        paddingLeft: onGoToPruefen ? 8 : 0,
       }}>
         <span
           title={`Auftrag-Dauer · läuft seit ${elapsedLabel}`}
@@ -2529,41 +2656,10 @@ function BetaTopPill({
         </button>
       </div>
 
-      {/* Stornieren — danger chip floating on the wrapper. */}
-      <button
-        type="button"
-        onClick={onStorno}
-        title="Auftrag stornieren — geht mit Begründung in die Historie"
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          height: 32,
-          padding: '0 14px',
-          fontSize: 11,
-          fontFamily: T.font.mono,
-          fontWeight: 600,
-          letterSpacing: '0.08em',
-          textTransform: 'uppercase',
-          color: T.status.danger.text,
-          background: chipBg,
-          border: 'none',
-          borderRadius: 999,
-          cursor: 'pointer',
-          transition: 'background 140ms, color 140ms',
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.background = T.status.danger.bg;
-          e.currentTarget.style.color = T.status.danger.main;
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.background = chipBg;
-          e.currentTarget.style.color = T.status.danger.text;
-        }}
-      >
-        Stornieren
-      </button>
-
-      {/* X close — square 32×32 white circle. */}
+      {/* X close — square 32×32 white circle. Stornieren has been
+          relocated to the BetaIslandBar overflow menu so the top pill
+          can stay focused on identity (timer · FBA) + nav (← Prüfen)
+          + exit, while destructive actions live one click deeper. */}
       <button
         type="button"
         onClick={onExit}
@@ -2609,12 +2705,33 @@ interface BetaIslandBarProps {
   schnellmodus: boolean;
   onToggleShell: () => void;
   onOpenList: () => void;
-  /* Inline ghost-text describing the literal next action; rendered
-     left of «Artikel abschließen» when present and non-zen. */
-  hint?: string | null;
-  /* Strong-signal predictive chip; click jumps the active item to the
-     predicted target. Suppressed in zen. */
-  prediction?: { label: string; onClick: () => void } | null;
+  /* Destructive action moved here from BetaTopPill so the top pill can
+     focus on identity + navigation. Rendered inside the menu tray with
+     a danger-tone style so it never competes with primary actions. */
+  onStorno: () => void;
+  /* Smooth pallet-intensity profile — heat-coloured curve rendered in
+     the left cluster of the bar (replaces the older hint/prediction
+     text pair). `null` hides the chart entirely (e.g. single-item
+     pallet). See computePalletIntensityProfile() in auftragHelpers. */
+  intensity?: {
+    values: number[];
+    activeIdx: number;
+    lastCompletedIdx: number;
+    hasVariance: boolean;
+    palletShortId?: string;
+    details?: Array<{
+      title: string;
+      perPackage: string;
+      units: number;
+      volCm3: number;
+      weightKg: number;
+      intensity: number;
+      level: number;
+      isEsku: boolean;
+      isCompleted: boolean;
+      isActive: boolean;
+    }>;
+  } | null;
 }
 function BetaIslandBar({
   onFertig, canFertig,
@@ -2622,14 +2739,59 @@ function BetaIslandBar({
   schnellmodus,
   onToggleShell,
   onOpenList,
-  hint = null,
-  prediction = null,
+  onStorno,
+  intensity = null,
 }: BetaIslandBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  /* Intensity chip → click toggles a floating detail panel that
+     hovers just above the island, showing the larger curve plus a
+     per-item breakdown (units · volume · weight · intensity). */
+  const [intensityOpen, setIntensityOpen] = useState(false);
+  /* Tray height is measured (not max-height) so the bar can animate to
+     the exact content height. The tray content is absolutely positioned
+     so its intrinsic width never propagates to the bar — keeping the
+     bar's width LOCKED at its closed/nav-row natural width. */
+  const trayContentRef = useRef<HTMLDivElement>(null);
+  const [trayHeight, setTrayHeight] = useState(0);
+  useLayoutEffect(() => {
+    const el = trayContentRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const h = el.scrollHeight;
+      if (h > 0) setTrayHeight(Math.round(h));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   /* Auto-collapse the menu whenever Zen turns on so the floating
      island reads as a single minimal nav bar. */
   useEffect(() => { if (zen && menuOpen) setMenuOpen(false); }, [zen, menuOpen]);
+  /* Same for the intensity panel — Zen should mute every popover. */
+  useEffect(() => { if (zen && intensityOpen) setIntensityOpen(false); }, [zen, intensityOpen]);
+  /* Esc dismisses the panel without competing with workflow hotkeys
+     (the page-level handler already gates on `intensityOpen=false`
+     via document target checks). */
+  useEffect(() => {
+    if (!intensityOpen) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setIntensityOpen(false); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [intensityOpen]);
+
+  /* Apple-style mutual exclusion: opening one tray closes the other so
+     the island never balloons with two stacked drawers at once. */
+  const openIntensity = () => { setIntensityOpen((v) => !v); setMenuOpen(false); };
+  const openMenu      = () => { setMenuOpen((v) => !v);      setIntensityOpen(false); };
+
+  /* The bar morphs between a tight pill (collapsed) and a soft rounded
+     rectangle (any tray open). Radius + min-width transition in unison
+     so it reads as a single Dynamic Island gesture. */
+  const anyOpen = !zen && (menuOpen || intensityOpen);
 
   return (
     <div style={{
@@ -2643,20 +2805,51 @@ function BetaIslandBar({
       marginLeft: 'calc(var(--sidebar-width) / 2)',
       background: '#F8F8F8',
       border: '2px solid #FFFFFF',
-      /* Adaptive radius: 50px reads as a pill when the bar is short
-         (collapsed). When the menu tray expands the bar to ~120px,
-         the same 50px radius starts to feel oversized — drop to 28px
-         so the bar reads as a soft rectangle with the chips comfortably
-         framed inside, instead of a stretched balloon. */
-      borderRadius: menuOpen && !zen ? 28 : 50,
+      borderRadius: anyOpen ? 28 : 50,
       overflow: 'hidden',
-      transition: 'background 240ms ease, border-color 240ms ease, border-radius 280ms cubic-bezier(0.16, 1, 0.3, 1)',
+      transition: [
+        'background 240ms ease',
+        'border-color 240ms ease',
+        'border-radius 320ms cubic-bezier(0.16, 1, 0.3, 1)',
+        /* Slide with the sidebar collapse/expand animation (same curve
+           + duration the Sidebar uses for its width transition). */
+        'margin-left 240ms cubic-bezier(0.16, 1, 0.3, 1)',
+      ].join(', '),
       pointerEvents: 'auto',
     }}>
+      {/* ── Intensity tray — expands inline above the nav row.
+          Width-LOCKED: the bar stays the same width as its closed
+          (nav-row driven) state because the tray content is absolutely
+          positioned. Out-of-flow elements don't contribute to their
+          containing block's intrinsic width, so no matter how wide the
+          tray's natural content would be, the bar never grows.
+          Only height animates — measured from the inner content via
+          ResizeObserver so the bar fits its contents exactly. */}
+      <div style={{
+        position: 'relative',
+        height:   intensityOpen && !zen ? trayHeight : 0,
+        opacity:  intensityOpen && !zen ? 1 : 0,
+        overflow: 'hidden',
+        transition: [
+          'height 320ms cubic-bezier(0.16, 1, 0.3, 1)',
+          'opacity 220ms ease',
+        ].join(', '),
+        pointerEvents: intensityOpen && !zen ? 'auto' : 'none',
+      }}>
+        <div
+          ref={trayContentRef}
+          style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0,
+          }}
+        >
+          {intensity && <IntensityTray intensity={intensity} />}
+        </div>
+      </div>
+
       {/* ── Expanding menu (toggles + storno + exit) ──────────────────
-          Collapses to height 0 when closed. Lives above the always-
-          visible nav row so the user sees secondary controls as a
-          tray pulled out of the island. */}
+          Same morphing tray pattern as Intensity; mutually exclusive
+          via openMenu/openIntensity. */}
       <div style={{
         maxHeight: menuOpen && !zen ? 64 : 0,
         opacity: menuOpen && !zen ? 1 : 0,
@@ -2674,6 +2867,46 @@ function BetaIslandBar({
         }}>
           <ViewListButton onClick={onOpenList} />
           <ShellToggle  on={schnellmodus}  onToggle={onToggleShell} />
+          {/* Hairline separator — splits utility toggles from the
+              destructive action so a stray click on Storno is one
+              deliberate jump rightward, never adjacent to the modes. */}
+          <span aria-hidden style={{
+            width: 1, height: 22, background: T.border.subtle, margin: '0 4px',
+          }} />
+          <button
+            type="button"
+            onClick={onStorno}
+            title="Auftrag stornieren — geht mit Begründung in die Historie"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              height: 32,
+              padding: '0 14px',
+              fontSize: 11,
+              fontFamily: T.font.mono,
+              fontWeight: 600,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: T.status.danger.text,
+              background: '#FFFFFF',
+              border: `1px solid ${T.border.subtle}`,
+              borderRadius: 999,
+              cursor: 'pointer',
+              transition: 'background 140ms, color 140ms, border-color 140ms',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = T.status.danger.bg;
+              e.currentTarget.style.color = T.status.danger.main;
+              e.currentTarget.style.borderColor = T.status.danger.border;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = '#FFFFFF';
+              e.currentTarget.style.color = T.status.danger.text;
+              e.currentTarget.style.borderColor = T.border.subtle;
+            }}
+          >
+            Stornieren
+          </button>
         </div>
       </div>
 
@@ -2685,75 +2918,37 @@ function BetaIslandBar({
         padding: '10px 14px 12px',
         display: 'flex',
         alignItems: 'center',
-        gap: 12,
+        gap: 6,
       }}>
-        {!zen && (hint || prediction) && (
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 10,
-            flexShrink: 1,
-            minWidth: 0,
-            paddingLeft: 4,
-          }}>
-            {hint && (
-              <span
-                title={hint}
-                style={{
-                  fontFamily: T.font.mono,
-                  fontSize: 11.5,
-                  fontWeight: 600,
-                  color: T.text.faint,
-                  letterSpacing: '0.02em',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  maxWidth: 240,
-                  transition: 'color 220ms ease',
-                }}
-              >
-                {hint}
-              </span>
-            )}
-            {prediction && (
-              <button
-                type="button"
-                onClick={prediction.onClick}
-                title={`Vorhersage: ${prediction.label} · klick zum Springen`}
-                style={{
-                  all: 'unset',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '4px 10px',
-                  background: T.accent.bg,
-                  color: T.accent.text,
-                  borderRadius: 999,
-                  fontFamily: T.font.mono,
-                  fontSize: 10.5,
-                  fontWeight: 700,
-                  letterSpacing: '0.04em',
-                  cursor: 'pointer',
-                  flexShrink: 0,
-                  transition: 'transform 200ms cubic-bezier(0.16,1,0.3,1), background 200ms',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                  e.currentTarget.style.background = `${T.accent.main}26`;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = 'none';
-                  e.currentTarget.style.background = T.accent.bg;
-                }}
-              >
-                <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden>
-                  <path d="M5 1l1.3 2.7L9 5 6.3 6.3 5 9 3.7 6.3 1 5l2.7-1.3z"
-                        fill="currentColor" />
-                </svg>
-                {prediction.label}
-              </button>
-            )}
-          </div>
+        {!zen && intensity && intensity.values.length >= 2 && (
+          <button
+            type="button"
+            onClick={openIntensity}
+            aria-expanded={intensityOpen}
+            aria-controls="mr-island-intensity"
+            aria-label="Pallet-Intensität — Details"
+            title="Pallet-Intensität · klicken für Aufschlüsselung"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: 44,
+              padding: '0 18px',
+              background: intensityOpen ? T.accent.bg : '#FFFFFF',
+              border: `1px solid ${intensityOpen ? T.accent.border : T.border.subtle}`,
+              borderRadius: 50,
+              flexShrink: 0,
+              cursor: 'pointer',
+              transition: 'background 160ms ease, border-color 160ms ease',
+            }}
+          >
+            <IntensityCurve
+              values={intensity.values}
+              activeIdx={intensity.activeIdx}
+              lastCompletedIdx={intensity.lastCompletedIdx}
+              hasVariance={intensity.hasVariance}
+            />
+          </button>
         )}
 
         {!zen && <span style={{ flex: 1 }} />}
@@ -2777,20 +2972,20 @@ function BetaIslandBar({
         {!zen && (
           <button
             type="button"
-            onClick={() => setMenuOpen((v) => !v)}
+            onClick={openMenu}
             title={menuOpen ? 'Menü schließen' : 'Menü öffnen'}
             aria-label="Insel-Menü"
             aria-expanded={menuOpen}
             style={{
-              width: 32,
-              height: 32,
+              width: 44,
+              height: 44,
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
-              background: menuOpen ? T.accent.bg : 'transparent',
+              background: menuOpen ? T.accent.bg : '#FFFFFF',
               color: menuOpen ? T.accent.text : T.text.subtle,
-              border: `1px solid ${menuOpen ? T.accent.border : T.border.primary}`,
-              borderRadius: 999,
+              border: `1px solid ${menuOpen ? T.accent.border : T.border.subtle}`,
+              borderRadius: 50,
               cursor: 'pointer',
               padding: 0,
               transition: 'background 160ms ease, border-color 160ms ease, color 160ms ease, transform 220ms ease',
@@ -2804,6 +2999,242 @@ function BetaIslandBar({
             </svg>
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   INTENSITY TRAY — minimalist Apple-style content rendered INSIDE the
+   BetaIslandBar (no floating dialog, no backdrop). The bar morphs around
+   it: radius softens, min-width grows.
+
+   Layers, top-to-bottom:
+     1. Hairline header  — pallet id · article count · peak % (one line)
+     2. Scrollable list  — per-item row with a heat-coloured underline bar
+                           as the only visual that scales with intensity.
+
+   Active item gets an accent halo, completed items dim to success tone.
+   No tiles, no big curve duplicate — the chip already carries the
+   silhouette, the tray exists to break it down by article.
+   ════════════════════════════════════════════════════════════════════════ */
+interface IntensityTrayProps {
+  intensity: NonNullable<BetaIslandBarProps['intensity']>;
+}
+function IntensityTray({ intensity }: IntensityTrayProps) {
+  const { values, hasVariance, activeIdx, lastCompletedIdx, palletShortId, details } = intensity;
+  const rows = details || [];
+  const n = rows.length;
+
+  const peakValue = useMemo(() => {
+    let pv = 0;
+    for (const r of rows) if (r.intensity > pv) pv = r.intensity;
+    return pv;
+  }, [rows]);
+
+  return (
+    <div
+      id="mr-island-intensity"
+      role="region"
+      aria-label={`Pallet-Intensität ${palletShortId || ''}`}
+      style={{
+        padding: '14px 18px 12px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        /* Conforms to the bar island's intrinsic (nav-row driven) width.
+           The bar stays the same size as its default closed pill — only
+           height changes. width:100% lets the tray fill that width
+           exactly, never inflating the bar past its natural pill. */
+        width: '100%',
+        boxSizing: 'border-box',
+      }}
+    >
+      {/* Compact one-line header — minimum chrome, max info density. */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'baseline',
+        justifyContent: 'space-between',
+        gap: 12,
+        whiteSpace: 'nowrap',
+      }}>
+        <span style={{
+          fontSize: 12,
+          fontWeight: 700,
+          color: T.text.primary,
+          letterSpacing: -0.1,
+        }}>
+          {palletShortId || 'Palette'}
+          <span style={{ fontWeight: 500, color: T.text.subtle, marginLeft: 6 }}>
+            · {n} Artikel
+          </span>
+        </span>
+        <span style={{
+          fontSize: 11,
+          color: T.text.subtle,
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          Spitze {Math.round(peakValue * 100)}%
+        </span>
+      </div>
+
+      {/* Hero curve — fluid SVG fills the full tray width so the
+          silhouette spans the entire island. Height stays fixed; the
+          curve stretches horizontally for a wide, panoramic read. */}
+      <div style={{ width: '100%', padding: '2px 0' }}>
+        <IntensityCurve
+          values={values}
+          activeIdx={activeIdx}
+          lastCompletedIdx={lastCompletedIdx}
+          hasVariance={hasVariance}
+          width={760}
+          height={84}
+          fluid
+        />
+      </div>
+
+      {/* List — single source of per-item detail. Each row is its own
+          card container so rows read as discrete items at a glance.
+          Scrolls when items overflow; otherwise the tray hugs its
+          natural height.
+
+          Wheel isolation: FlowStream attaches a window-level wheel
+          listener that advances the active card. Without isolation,
+          scrolling inside this list would bleed through and accidentally
+          step the worker's Focus position. We stop wheel propagation at
+          the list and use `overscroll-behavior: contain` to also block
+          native scroll-chaining at the boundaries. */}
+      <div
+        onWheel={(e) => e.stopPropagation()}
+        style={{
+          maxHeight: 248,
+          overflowY: 'auto',
+          overscrollBehavior: 'contain',
+          margin: '0 -2px',
+          padding: '0 2px 2px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}
+      >
+        {rows.map((r, i) => (
+          <IntensityRow key={i} idx={i} row={r} peakValue={peakValue} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface IntensityRowProps {
+  idx: number;
+  row: NonNullable<NonNullable<BetaIslandBarProps['intensity']>['details']>[number];
+  peakValue: number;
+}
+function IntensityRow({ idx, row, peakValue }: IntensityRowProps) {
+  const fill = peakValue > 0 ? Math.max(0.04, Math.min(1, row.intensity / peakValue)) : 0;
+  const isHighlighted = row.isActive;
+  /* Each row is its own card — white surface against the bar's #F8F8F8
+     so rows pop as discrete items. Active row picks up the accent halo,
+     completed rows take a success tint; the hairline border morphs to
+     match each state for a unified visual signal. */
+  const bg = isHighlighted
+    ? T.accent.bg
+    : row.isCompleted ? T.status.success.bg : '#FFFFFF';
+  const borderColor = isHighlighted
+    ? T.accent.border
+    : row.isCompleted ? `${T.status.success.main}33` : T.border.subtle;
+  const titleColor = row.isCompleted ? T.status.success.text : T.text.primary;
+  return (
+    <div
+      style={{
+        position: 'relative',
+        display: 'grid',
+        gridTemplateColumns: '26px 1fr auto',
+        alignItems: 'center',
+        gap: 14,
+        padding: '13px 16px 16px',
+        background: bg,
+        border: `1px solid ${borderColor}`,
+        borderRadius: 12,
+        opacity: row.isCompleted && !row.isActive ? 0.7 : 1,
+        transition: 'background 160ms, border-color 160ms',
+      }}
+    >
+      <span style={{
+        fontSize: 11,
+        fontWeight: 600,
+        color: T.text.faint,
+        fontVariantNumeric: 'tabular-nums',
+        textAlign: 'right',
+      }}>
+        {idx + 1}
+      </span>
+
+      <span style={{
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 6,
+        minWidth: 0,
+        overflow: 'hidden',
+      }}>
+        <span style={{
+          fontSize: 13,
+          fontWeight: 500,
+          color: titleColor,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          minWidth: 0,
+          letterSpacing: -0.1,
+        }}>
+          {row.title}
+        </span>
+        {row.perPackage && (
+          <span style={{
+            fontSize: 11,
+            fontWeight: 500,
+            color: T.text.faint,
+            whiteSpace: 'nowrap',
+            fontVariantNumeric: 'tabular-nums',
+            flexShrink: 0,
+          }}>
+            · {row.perPackage}
+          </span>
+        )}
+      </span>
+
+      <span style={{
+        fontSize: 12,
+        fontWeight: 600,
+        color: T.text.subtle,
+        fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap',
+      }}>
+        {Math.round(row.intensity * 100)}%
+      </span>
+
+      {/* Underline bar — the only intensity visual, spans the row's
+          content area like a Mac progress hairline. Heat-coloured so
+          the curve's gradient logic carries through to the breakdown.
+          Offsets account for the 1px border + roomier padding so the
+          bar sits inside the card cleanly with a little breathing room. */}
+      <div aria-hidden style={{
+        position: 'absolute',
+        left: 16,
+        right: 16,
+        bottom: 6,
+        height: 3,
+        background: 'rgba(0,0,0,0.05)',
+        borderRadius: 50,
+        overflow: 'hidden',
+      }}>
+        <div style={{
+          width: `${fill * 100}%`,
+          height: '100%',
+          background: heatColor(row.intensity),
+          borderRadius: 50,
+          transition: 'width 220ms ease',
+        }} />
       </div>
     </div>
   );
@@ -3064,6 +3495,242 @@ function PalletFlow({
    Triggered by the FlowToggle in the Topbar (hotkey F). When OFF, the
    classic single-hero layout in <main> renders unchanged.
    ════════════════════════════════════════════════════════════════════════ */
+
+/* IntensityCurve — smooth heat-coloured area chart that rides in the
+   left cluster of the BetaIslandBar (beta-only). Reads the per-item
+   intensity profile (units × volume × weight, normalized per pallet)
+   produced by computePalletIntensityProfile() and renders it as a
+   minimalist Catmull-Rom → cubic-Bézier filled curve. The horizontal
+   <linearGradient> stops are heat-coloured (cool → warm) keyed to
+   each item's intensity value so the gradient itself tells the worker
+   where the heavy zones are. Completion is shown by clipping the
+   curve into two regions (done = 80% opacity, pending = 28%); the
+   active item gets a 1px vertical whisper-line. No axes, no grid,
+   no labels — the silhouette + colour carries the whole message. */
+interface IntensityCurveProps {
+  values: number[];
+  activeIdx: number;
+  lastCompletedIdx: number;
+  hasVariance: boolean;
+  /* Optional sizing — the chip in BetaIslandBar uses the defaults. Kept
+     extensible so a hero-sized variant can be added without forking. */
+  width?: number;
+  height?: number;
+  /* Fluid mode — SVG scales to its container's width via
+     preserveAspectRatio. Used by the expanded IntensityTray to fill the
+     full bar island width regardless of viewport size. */
+  fluid?: boolean;
+}
+const INTENSITY_W = 160;
+const INTENSITY_H = 28;
+/* Soft pastel heat-scale — preserves the cool→warm semantic but in
+   gentler hues that don't fight the accent palette of the pill. */
+const HEAT_STOPS = [
+  '#A5B4FC', // 0.0   — soft indigo (low intensity)
+  '#C4B5FD', // 0.33  — lavender
+  '#F0ABFC', // 0.66  — soft fuchsia
+  '#FDA4AF', // 1.0   — warm rose
+];
+function heatColor(t: number): string {
+  const clamped = Math.max(0, Math.min(1, t));
+  const seg = clamped * (HEAT_STOPS.length - 1);
+  const i = Math.floor(seg);
+  const f = seg - i;
+  const a = HEAT_STOPS[i];
+  const b = HEAT_STOPS[Math.min(HEAT_STOPS.length - 1, i + 1)];
+  /* mix two hex colors in RGB space */
+  const ah = a.slice(1); const bh = b.slice(1);
+  const ar = parseInt(ah.slice(0, 2), 16);
+  const ag = parseInt(ah.slice(2, 4), 16);
+  const ab = parseInt(ah.slice(4, 6), 16);
+  const br = parseInt(bh.slice(0, 2), 16);
+  const bg = parseInt(bh.slice(2, 4), 16);
+  const bb = parseInt(bh.slice(4, 6), 16);
+  const r = Math.round(ar + (br - ar) * f);
+  const g = Math.round(ag + (bg - ag) * f);
+  const bl = Math.round(ab + (bb - ab) * f);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${bl.toString(16).padStart(2, '0')}`;
+}
+/* Catmull-Rom (tension 0.5) → cubic Bézier path string. Closes the
+   shape down to the baseline so it can be filled as an area. */
+function smoothAreaPath(points: Array<[number, number]>, baselineY: number): string {
+  if (points.length === 0) return '';
+  if (points.length === 1) {
+    const [x, y] = points[0];
+    return `M${x},${baselineY} L${x},${y} L${x},${baselineY} Z`;
+  }
+  const parts: string[] = [`M${points[0][0]},${baselineY} L${points[0][0]},${points[0][1]}`];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    parts.push(`C${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`);
+  }
+  const lastX = points[points.length - 1][0];
+  parts.push(`L${lastX},${baselineY} Z`);
+  return parts.join(' ');
+}
+function IntensityCurve({
+  values, activeIdx, lastCompletedIdx, hasVariance,
+  width = INTENSITY_W, height = INTENSITY_H,
+  fluid = false,
+}: IntensityCurveProps) {
+  const uid = useId().replace(/:/g, '');
+  const n = values.length;
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  /* Fluid mode — measure the SVG's actual rendered width so the viewBox
+     matches it 1:1. That keeps marker circles circular regardless of
+     container size (no preserveAspectRatio="none" distortion). The
+     fallback to the prop value covers the very first paint before the
+     observer fires; in practice useLayoutEffect runs before paint, so
+     this fallback is almost never visible. */
+  const [measuredW, setMeasuredW] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    if (!fluid) return undefined;
+    const el = svgRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0) setMeasuredW(Math.round(r.width));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fluid]);
+  const W = fluid && measuredW ? measuredW : width;
+
+  /* Flat-profile fallback: a near-uniform pallet should still produce
+     a soft baseline shape rather than a jagged 5% waveform. */
+  const effective = hasVariance ? values : values.map(() => 0.5);
+
+  const points: Array<[number, number]> = effective.map((v, i) => {
+    const x = n === 1 ? W / 2 : (i / (n - 1)) * W;
+    const y = (1 - v) * (height - 2) + 1; /* 1px top inset so the curve doesn't kiss the edge */
+    return [x, y];
+  });
+  const d = smoothAreaPath(points, height);
+
+  /* Heat stops keyed to each item's intensity value, positioned along
+     the horizontal axis at the same x as the item itself. */
+  const heatStops = effective.map((v, i) => ({
+    offset: n === 1 ? 0 : (i / (n - 1)) * 100,
+    color: heatColor(v),
+  }));
+
+  /* Stroke-only path (no baseline close) — for the silhouette curve. */
+  const strokeD = (() => {
+    if (points.length === 0) return '';
+    if (points.length === 1) {
+      const [x, y] = points[0];
+      return `M${x},${y}`;
+    }
+    const parts: string[] = [`M${points[0][0]},${points[0][1]}`];
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[Math.max(0, i - 1)];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = points[Math.min(points.length - 1, i + 2)];
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+      const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+      const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      parts.push(`C${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`);
+    }
+    return parts.join(' ');
+  })();
+
+  const splitX = lastCompletedIdx >= 0
+    ? ((lastCompletedIdx + 1) / n) * W
+    : 0;
+  const activeOnCurve = activeIdx >= 0 && activeIdx < n ? points[activeIdx] : null;
+
+  const flatOpacity = hasVariance ? 1 : 0.45;
+  /* Stroke + active-marker radii scale gently with the rendered height
+     so the larger curve in the detail panel reads as a proper hero
+     visual instead of a stretched pill thumbnail. */
+  const strokeW    = Math.max(2.5, height / 24);
+  const haloR      = Math.max(4.5, height / 16);
+  const dotR       = Math.max(2.6, height / 24);
+
+  return (
+    <svg
+      ref={svgRef}
+      width={fluid ? '100%' : W}
+      height={height}
+      viewBox={`0 0 ${W} ${height}`}
+      preserveAspectRatio="xMidYMid meet"
+      aria-hidden
+      style={{
+        display: 'block',
+        overflow: 'visible',
+        ...(fluid ? { width: '100%' } : null),
+      }}
+    >
+      <defs>
+        <linearGradient id={`heat-${uid}`} x1="0" y1="0" x2="1" y2="0">
+          {heatStops.map((s, i) => (
+            <stop key={i} offset={`${s.offset}%`} stopColor={s.color} />
+          ))}
+        </linearGradient>
+        {/* Vertical area-fade: opaque just under the stroke, fully
+            transparent at the baseline — gives the soft "glow" feel
+            of the reference instead of a heavy filled silhouette. */}
+        <linearGradient id={`fade-${uid}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor="#FFF" stopOpacity="0.95" />
+          <stop offset="100%" stopColor="#FFF" stopOpacity="0" />
+        </linearGradient>
+        <mask id={`fademask-${uid}`}>
+          <rect x={0} y={0} width={W} height={height} fill={`url(#fade-${uid})`} />
+        </mask>
+        <clipPath id={`done-${uid}`}>
+          <rect x={0} y={0} width={splitX} height={height} />
+        </clipPath>
+        <clipPath id={`pending-${uid}`}>
+          <rect x={splitX} y={0} width={W - splitX} height={height} />
+        </clipPath>
+      </defs>
+
+      {/* Soft area glow underneath — single subtle fill across the
+          whole curve, opacity modulated by done/pending zones. */}
+      <g clipPath={`url(#pending-${uid})`} opacity={0.18 * flatOpacity}>
+        <path d={d} fill={`url(#heat-${uid})`} mask={`url(#fademask-${uid})`} />
+      </g>
+      <g clipPath={`url(#done-${uid})`} opacity={0.32 * flatOpacity}>
+        <path d={d} fill={`url(#heat-${uid})`} mask={`url(#fademask-${uid})`} />
+      </g>
+
+      {/* Stroke — the primary visual. Pending half at 85%, done half
+          at full saturation; both share the same gentle heat gradient. */}
+      <g clipPath={`url(#pending-${uid})`} opacity={0.85 * flatOpacity}>
+        <path d={strokeD} fill="none" stroke={`url(#heat-${uid})`}
+              strokeWidth={strokeW} strokeLinecap="round" strokeLinejoin="round" />
+      </g>
+      <g clipPath={`url(#done-${uid})`} opacity={1 * flatOpacity}>
+        <path d={strokeD} fill="none" stroke={`url(#heat-${uid})`}
+              strokeWidth={strokeW} strokeLinecap="round" strokeLinejoin="round" />
+      </g>
+
+      {/* Active marker — small white-filled circle ON the curve at the
+          active item's point, with a soft accent halo. */}
+      {activeOnCurve && (
+        <g>
+          <circle cx={activeOnCurve[0]} cy={activeOnCurve[1]} r={haloR}
+                  fill="#FFFFFF" opacity={0.35} />
+          <circle cx={activeOnCurve[0]} cy={activeOnCurve[1]} r={dotR}
+                  fill="#FFFFFF"
+                  stroke="var(--accent)" strokeWidth="1.2" />
+        </g>
+      )}
+    </svg>
+  );
+}
 
 /* FlowCompactRow — single horizontal row for one article in the
    stream. Two visual variants only:
@@ -3379,6 +4046,25 @@ function FlowHero({ item, copied, onCopyCode, onCopyUse, flashUse, reCopyTick = 
     setHovered(false);
   }, []);
 
+  /* Re-copy «press» — when reCopyTick bumps, toggle `mr-recopy-flash`
+     on the X00 code SPAN via its ref. Inner button can't host the
+     animation directly (its `all: 'unset'` inline style resets
+     `display` to inline, killing transform). Direct classList toggle
+     + a layout-flush reflow re-triggers the keyframes cleanly on
+     every consecutive re-copy without remount. */
+  const codeRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (reCopyTick <= 0) return;
+    const el = codeRef.current;
+    if (!el) return;
+    el.classList.remove('mr-recopy-flash');
+    /* eslint-disable-next-line @typescript-eslint/no-unused-expressions */
+    el.offsetWidth;
+    el.classList.add('mr-recopy-flash');
+    const t = setTimeout(() => el.classList.remove('mr-recopy-flash'), 400);
+    return () => clearTimeout(t);
+  }, [reCopyTick]);
+
   return (
     <div
       ref={cardRef}
@@ -3552,8 +4238,6 @@ function FlowHero({ item, copied, onCopyCode, onCopyUse, flashUse, reCopyTick = 
             <button
               type="button"
               onClick={onCopyCode}
-              key={`flow-code-${reCopyTick}`}
-              className={reCopyTick > 0 ? 'mr-recopy-flash' : undefined}
               title={copied ? `${code} · kopiert` : `${code} · klick zum Kopieren`}
               style={{
                 all: 'unset',
@@ -3569,7 +4253,12 @@ function FlowHero({ item, copied, onCopyCode, onCopyUse, flashUse, reCopyTick = 
                 transition: 'color 240ms ease',
               }}
             >
-              {code || '—'}
+              {/* Inner span hosts the press-animation: it's a plain
+                  inline-block we own, free of the button's `all: unset`
+                  display reset, so transform/opacity actually paint. */}
+              <span ref={codeRef} style={{ display: 'inline-block', transformOrigin: 'center' }}>
+                {code || '—'}
+              </span>
             </button>
 
             {/* Use-Item code — small mono, click-to-copy. Hidden when the

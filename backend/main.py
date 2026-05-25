@@ -17,6 +17,7 @@ from .routers import (
     auftraege,
     exports,
     history,
+    lynne,
     packing,
     reports,
     search,
@@ -100,6 +101,7 @@ app.include_router(search.router)     # /api/search
 app.include_router(activity.router)   # /api/activity/live, /api/activity/shift
 app.include_router(exports.router)    # /api/exports/auftraege.xlsx
 app.include_router(reports.router)    # /api/reports/aggregates
+app.include_router(lynne.router)      # /api/lynne/products
 
 
 @app.get("/health")

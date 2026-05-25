@@ -291,6 +291,30 @@ proper `rgba(...)` literal.
     `DEFAULT_KG_PER_CARTON=0.55`. The fallback is silent (no warning) —
     if a worker complains "the OVERLOAD-W flag is wrong", check first
     whether the SKU has a row via Admin → Dimensions.
+12. **LYNNE catalog admin edits vs xlsx re-import** — `/api/lynne/admin/*`
+    endpoints let admins inline-edit `lynne_products` rows (description,
+    brand, perPallet, asin/sku rename, channel, ean, weekly_sales,
+    graz_stock + dimensions in `sku_dimensions`) via the Edit-drawer in
+    Katalog. **These edits are NOT persisted in the source xlsx — the
+    next `python -m backend.import_lynne --source ...xlsx` will OVERWRITE
+    them.** Workflow: either fix the upstream xlsx first, or coordinate
+    with whoever runs the importer. Every mutation writes an `AuditLog`
+    row (`action=lynne_product_create/update/delete/asin_rename/_asin_batch`)
+    so changes are traceable.
+
+## LYNNE admin endpoints (Sprint 4 — UI in EditAsinDrawer)
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| POST | `/api/lynne/admin/products` | LynneProductCreate | 409 if `<asin>__<sku>` exists |
+| PATCH | `/api/lynne/admin/asins/{asin}` | LynneAsinBatchPatch | desc/brand/perPallet batch over all variants |
+| PATCH | `/api/lynne/admin/products/{id}` | LynneVariantPatch | sku-rename → DELETE+INSERT (PK recompute) |
+| DELETE | `/api/lynne/admin/products/{id}` | — | 404 if missing |
+| PATCH | `/api/lynne/admin/asins/{asin}/rename` | `{newAsin}` | 409 if target ASIN already has rows |
+
+All gated by `require_admin`. Frontend hides edit affordances unless
+`useMe().data?.role === 'admin'`. Drawer rendered only in Katalog view
+(Verkäufe stays read-only).
 
 ## Working with Claude in this repo
 

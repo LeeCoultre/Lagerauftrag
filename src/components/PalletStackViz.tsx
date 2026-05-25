@@ -185,8 +185,6 @@ function PalletFrame({
         </defs>
 
         <g clipPath={`url(#clip-${patternId})`}>
-          {/* Empty top zone — soft dot grid */}
-          <rect x={0} y={0} width={W} height={H} fill={`url(#empty-${patternId})`} />
 
           {/* Filled layers */}
           {layers.map(({ lvl, y, h }) => {
@@ -201,7 +199,7 @@ function PalletFrame({
                 key={lvl}
                 onMouseEnter={() => setHover(lvl)}
                 onMouseLeave={() => setHover(null)}
-                style={{ cursor: 'help' }}
+                style={{ cursor: 'default' }}
               >
                 <rect
                   x={0}
@@ -270,19 +268,6 @@ function PalletFrame({
                 )}
                 {eskuCount > 0 && showLabels && h >= 16 && (
                   <circle cx={W - 10} cy={y + 8} r="2.5" fill="#FFFFFF" />
-                )}
-                {eskuCount > 0 && !showLabels && (
-                  <text
-                    x={W - 3}
-                    y={y + h / 2 + 3}
-                    textAnchor="end"
-                    fontSize={9}
-                    fontFamily={T.font.mono}
-                    fill="#fff"
-                    fontWeight={700}
-                  >
-                    +{eskuCount}
-                  </text>
                 )}
               </g>
             );

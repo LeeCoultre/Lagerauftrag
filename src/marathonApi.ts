@@ -28,6 +28,13 @@ import type {
   AuftragReorderItem,
   AuftragSummary,
   HistoryPage,
+  LynneAsinBatchPatch,
+  LynneAsinGroup,
+  LynneAsinRename,
+  LynneCatalog,
+  LynneProductCreate,
+  LynneProductRead,
+  LynneVariantPatch,
   ReportsAggregates,
   ReportsQuery,
   SearchQuery,
@@ -213,6 +220,33 @@ export const getActivityLive = (limit = 50): Promise<ActivityFeed> =>
 
 export const getMyShift = (): Promise<ShiftInfo> =>
   call('GET', '/api/activity/shift');
+
+/* ─── LYNNE catalog ─────────────────────────────────────────────────────
+ * Standalone product catalog fed from Produktaufstellung_KWxx.xlsx
+ * (sheet "Verkäufe") via `python -m backend.import_lynne`. Independent
+ * of Marathon's operational tables — refresh by re-running the importer
+ * with the new weekly xlsx. */
+export const getLynneProducts = (): Promise<LynneCatalog> =>
+  call('GET', '/api/lynne/products');
+
+/* Admin CRUD for /api/lynne/admin/*. Each helper goes through `call()`
+   so the JWT, snake↔camel conversion and error normalisation are
+   identical to the rest of the surface. Use from TanStack Query
+   mutations with optimistic updates against ['lynne-products']. */
+export const adminCreateLynneProduct = (payload: LynneProductCreate): Promise<LynneProductRead> =>
+  call('POST', '/api/lynne/admin/products', payload);
+
+export const adminPatchLynneAsin = (asin: string, payload: LynneAsinBatchPatch): Promise<LynneAsinGroup> =>
+  call('PATCH', `/api/lynne/admin/asins/${encodeURIComponent(asin)}`, payload);
+
+export const adminPatchLynneProduct = (id: string, payload: LynneVariantPatch): Promise<LynneProductRead> =>
+  call('PATCH', `/api/lynne/admin/products/${encodeURIComponent(id)}`, payload);
+
+export const adminDeleteLynneProduct = (id: string): Promise<null> =>
+  call('DELETE', `/api/lynne/admin/products/${encodeURIComponent(id)}`);
+
+export const adminRenameLynneAsin = (asin: string, payload: LynneAsinRename): Promise<LynneAsinGroup> =>
+  call('PATCH', `/api/lynne/admin/asins/${encodeURIComponent(asin)}/rename`, payload);
 
 /* ─── Reports (Berichte analytics aggregates) ─────────────────────────
  * Backend aggregates parsed blobs over a lookback window (≤90 days) and
