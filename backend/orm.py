@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, time as time_t
 from typing import Any, Optional
 
 from sqlalchemy import (
@@ -28,6 +28,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Time,
     func,
     text,
 )
@@ -57,6 +58,13 @@ class WorkflowStep(str, enum.Enum):
     pruefen = "pruefen"
     focus = "focus"
     abschluss = "abschluss"
+
+
+class PalletClaimState(str, enum.Enum):
+    active = "active"
+    released = "released"
+    completed = "completed"
+    taken_over = "taken_over"
 
 
 # ─── users ───────────────────────────────────────────────────────────
@@ -148,6 +156,19 @@ class Auftrag(Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
 
+    # Multi-user session state (migration e7f8a9b0c1d2).
+    # session_users: [{user_id, name, role: 'primary'|'participant',
+    #                  joined_at, last_seen_at}], capped at 5 entries.
+    # user_progress: { "<user_uuid>": {current_pallet_idx, current_item_idx,
+    #                                  copied_keys: {...}} } — per-user
+    # cursor and copied-chip state for the Focus screen.
+    session_users: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    user_progress: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -171,6 +192,67 @@ class Auftrag(Base):
 
     def __repr__(self) -> str:
         return f"<Auftrag {self.file_name} [{self.status.value}]>"
+
+
+# ─── pallet_claims ───────────────────────────────────────────────────
+# Per-pallet ownership row for multi-user Focus sessions. The partial
+# unique index on (auftrag_id, pallet_idx) WHERE state='active' is the
+# load-bearing concurrency primitive: parallel INSERTs collide so the
+# loser sees ON CONFLICT DO NOTHING return 0 rows.
+
+class PalletClaim(Base):
+    __tablename__ = "pallet_claims"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    auftrag_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("auftraege.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pallet_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    state: Mapped[PalletClaimState] = mapped_column(
+        SAEnum(PalletClaimState, name="pallet_claim_state"),
+        nullable=False,
+        default=PalletClaimState.active,
+        server_default=text("'active'::pallet_claim_state"),
+    )
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    released_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_active_claim",
+            "auftrag_id", "pallet_idx",
+            unique=True,
+            postgresql_where=text("state = 'active'"),
+        ),
+        Index("idx_claims_auftrag_state", "auftrag_id", "state"),
+        Index(
+            "idx_claims_user_active",
+            "user_id",
+            postgresql_where=text("state = 'active'"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PalletClaim {self.auftrag_id}#{self.pallet_idx} "
+            f"by {self.user_id} [{self.state.value}]>"
+        )
 
 
 # ─── audit_log ───────────────────────────────────────────────────────
@@ -239,6 +321,14 @@ class SkuDimension(Base):
     # (sum of count/max ≤ 1.0 = within physical capacity).
     pallet_load_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Purchase price per VPE (Einheit) in EUR — source of truth for the
+    # Warenwert column in Berichte. Imported from xlsx sheet "Preise +
+    # Infos" via `python -m backend.import_prices`; admins can override
+    # per-row through Admin → Dimensions. Nullable: items without a row
+    # here are skipped in the cost aggregation and surface via
+    # `items_value_coverage_pct` so the user knows the % is partial.
+    price_per_einheit_eur: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -303,3 +393,51 @@ class LynneProduct(Base):
 
     def __repr__(self) -> str:
         return f"<LynneProduct {self.asin} {self.sku} [{self.channel}]>"
+
+
+# ─── work_schedule ───────────────────────────────────────────────────
+# Singleton row (id=1) holding the warehouse working window: hours,
+# break, working days and IANA timezone. Drives `effective_seconds`
+# everywhere (Auftrag duration on /complete, live timer on Focus, KPI
+# breakdowns in Historie/Admin). Admins edit via Admin → Arbeitszeit.
+
+class WorkSchedule(Base):
+    __tablename__ = "work_schedule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    work_start: Mapped[time_t] = mapped_column(Time, nullable=False)
+    work_end: Mapped[time_t] = mapped_column(Time, nullable=False)
+    break_start: Mapped[time_t] = mapped_column(Time, nullable=False)
+    break_end: Mapped[time_t] = mapped_column(Time, nullable=False)
+    # ISO weekday: Mon=1, Sun=7. Default Mon–Fri.
+    working_days: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, server_default=text("'{1,2,3,4,5}'::integer[]")
+    )
+    timezone_name: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default=text("'Europe/Berlin'")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    updated_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_work_schedule_singleton"),
+        CheckConstraint(
+            "work_start < break_start AND break_start < break_end "
+            "AND break_end < work_end",
+            name="ck_work_schedule_window_order",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<WorkSchedule {self.work_start}–{self.work_end} "
+            f"break {self.break_start}–{self.break_end} "
+            f"days={self.working_days} tz={self.timezone_name}>"
+        )

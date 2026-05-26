@@ -158,3 +158,60 @@ async def require_admin(
     if user.role != UserRole.admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin only")
     return user
+
+
+# Module-level cache for the "is the migration applied?" check. Set
+# to False once we discover the work_schedule table is missing, so we
+# stop probing the DB on every request (which would otherwise rollback
+# the active txn and poison the rest of the request). A redeploy after
+# `alembic upgrade head` resets this back to None.
+_WORK_SCHEDULE_TABLE_EXISTS: Optional[bool] = None
+
+
+async def _work_schedule_table_exists(db: AsyncSession) -> bool:
+    global _WORK_SCHEDULE_TABLE_EXISTS
+    if _WORK_SCHEDULE_TABLE_EXISTS is not None:
+        return _WORK_SCHEDULE_TABLE_EXISTS
+    from sqlalchemy import text
+    row = await db.execute(text("SELECT to_regclass('public.work_schedule')"))
+    exists = row.scalar_one() is not None
+    _WORK_SCHEDULE_TABLE_EXISTS = exists
+    return exists
+
+
+def invalidate_work_schedule_table_check() -> None:
+    """Force re-probing the table existence — call after a migration runs
+    in the same process. Most deploys restart the container, which makes
+    this a no-op."""
+    global _WORK_SCHEDULE_TABLE_EXISTS
+    _WORK_SCHEDULE_TABLE_EXISTS = None
+
+
+async def load_work_schedule(
+    db: AsyncSession = Depends(get_db),
+):
+    """FastAPI dep returning the active warehouse schedule.
+
+    Reads the singleton row from `work_schedule` (id=1). Falls back to
+    `DEFAULT_SCHEDULE` when the row is missing OR the table itself
+    doesn't exist yet (pre-migration deploy state). The existence
+    check is cached process-wide, so the hot path costs at most one
+    `SELECT` per request — and zero once the table is confirmed present.
+    """
+    from zoneinfo import ZoneInfo
+    from backend.orm import WorkSchedule as WorkScheduleRow
+    from backend.work_time import DEFAULT_SCHEDULE, WorkSchedule as WorkScheduleCfg
+
+    if not await _work_schedule_table_exists(db):
+        return DEFAULT_SCHEDULE
+    row = await db.get(WorkScheduleRow, 1)
+    if row is None:
+        return DEFAULT_SCHEDULE
+    return WorkScheduleCfg(
+        work_start=row.work_start,
+        work_end=row.work_end,
+        break_start=row.break_start,
+        break_end=row.break_end,
+        working_days=frozenset(row.working_days or [1, 2, 3, 4, 5]),
+        tz=ZoneInfo(row.timezone_name or "Europe/Berlin"),
+    )

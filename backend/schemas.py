@@ -10,13 +10,21 @@ Note: backend/models.py holds Pydantic DTOs for the pallet packer
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timezone as dt_timezone
 from typing import Any, Generic, Optional, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.orm import Auftrag, AuftragStatus, User, UserRole, WorkflowStep
+from backend.orm import (
+    Auftrag,
+    AuftragStatus,
+    PalletClaimState,
+    User,
+    UserRole,
+    WorkflowStep,
+)
+from backend.work_time import WorkSchedule as WorkScheduleCfg, effective_seconds
 
 T = TypeVar("T")
 
@@ -123,12 +131,20 @@ class AuftragCreate(BaseModel):
 
 
 class WorkflowProgress(BaseModel):
-    """PATCH /api/auftraege/{id}/progress — only fields actually being updated."""
+    """PATCH /api/auftraege/{id}/progress — only fields actually being updated.
+
+    `copied_keys` is per-user (multi-user Focus session). Server merges
+    into auftraege.user_progress[<user_id>].copied_keys instead of the
+    shared completed_keys dict. Classic single-user frontend keeps the
+    chip state in localStorage and doesn't send this field — the path
+    is opt-in for beta.
+    """
     step: Optional[WorkflowStep] = None
     current_pallet_idx: Optional[int] = None
     current_item_idx: Optional[int] = None
     completed_keys: Optional[dict[str, Any]] = None
     pallet_timings: Optional[dict[str, Any]] = None
+    copied_keys: Optional[dict[str, Any]] = None
 
 
 class WorkflowAbortItem(BaseModel):
@@ -177,18 +193,38 @@ class AuftragSummary(APIModel):
     finished_at: Optional[datetime] = None
     duration_sec: Optional[int] = None
     pallet_timings: dict[str, Any] = Field(default_factory=dict)  # used by Historie row expand
+    # Per-pallet effective seconds — keyed by pallet.id. Populated only
+    # when a `schedule` is passed into `from_orm_row`; empty `{}` for
+    # endpoints that don't need it (saves the iteration cost on hot
+    # paths like /api/admin/auftraege).
+    pallet_effective_seconds: dict[str, int] = Field(default_factory=dict)
 
     @classmethod
     def from_orm_row(
         cls,
         row: Auftrag,
         assigned_to_user_name: Optional[str] = None,
+        schedule: Optional[WorkScheduleCfg] = None,
     ) -> AuftragSummary:
         parsed = row.parsed or {}
         meta = parsed.get("meta") or {}
         pallets = parsed.get("pallets") or []
         esku_items = parsed.get("einzelneSkuItems") or []
         total_units = meta.get("totalUnits")
+        pal_eff: dict[str, int] = {}
+        if schedule is not None and isinstance(row.pallet_timings, dict):
+            for pid, t in row.pallet_timings.items():
+                if not isinstance(t, dict):
+                    continue
+                started = t.get("startedAt")
+                finished = t.get("finishedAt")
+                if not isinstance(started, (int, float)):
+                    continue
+                if not isinstance(finished, (int, float)):
+                    finished = datetime.now(dt_timezone.utc).timestamp() * 1000
+                s_dt = datetime.fromtimestamp(started / 1000, tz=dt_timezone.utc)
+                f_dt = datetime.fromtimestamp(finished / 1000, tz=dt_timezone.utc)
+                pal_eff[str(pid)] = effective_seconds(s_dt, f_dt, schedule)
         return cls(
             id=row.id,
             file_name=row.file_name,
@@ -207,6 +243,7 @@ class AuftragSummary(APIModel):
             finished_at=row.finished_at,
             duration_sec=row.duration_sec,
             pallet_timings=row.pallet_timings or {},
+            pallet_effective_seconds=pal_eff,
         )
 
 
@@ -228,6 +265,7 @@ class SkuDimensionRead(APIModel):
     height_cm: float
     weight_kg: float
     pallet_load_max: Optional[int] = None
+    price_per_einheit_eur: Optional[float] = None
     source: Optional[str] = None
     updated_at: datetime
     updated_by: Optional[str] = None
@@ -244,6 +282,7 @@ class SkuDimensionLookup(BaseModel):
     height_cm: float
     weight_kg: float
     pallet_load_max: Optional[int] = None
+    price_per_einheit_eur: Optional[float] = None
     source: Optional[str] = None
 
 
@@ -275,6 +314,7 @@ class SkuDimensionUpsert(BaseModel):
     height_cm: float = Field(gt=0)
     weight_kg: float = Field(ge=0)
     pallet_load_max: Optional[int] = Field(default=None, ge=1)
+    price_per_einheit_eur: Optional[float] = Field(default=None, ge=0)
 
 
 class SkuDimensionImportResult(BaseModel):
@@ -363,6 +403,47 @@ class ShiftInfo(BaseModel):
 
 # ─── Auftraege — full detail ─────────────────────────────────────────
 
+class PalletClaimDTO(APIModel):
+    """One row of pallet_claims — per-pallet ownership for multi-user Focus."""
+    pallet_idx: int
+    user_id: UUID
+    user_name: str
+    state: PalletClaimState
+    claimed_at: datetime
+    heartbeat_at: datetime
+    released_at: Optional[datetime] = None
+    is_stale: bool = False  # derived: now - heartbeat_at > 5 min, state='active'
+
+
+class SessionUser(BaseModel):
+    """Membership entry in auftraege.session_users JSONB array."""
+    user_id: UUID
+    name: str
+    role: str  # 'primary' | 'participant'
+    joined_at: datetime
+    last_seen_at: datetime
+
+
+class UserPalletProgress(BaseModel):
+    """Per-user cursor + copied-chip state, value in user_progress JSONB map."""
+    current_pallet_idx: Optional[int] = None
+    current_item_idx: Optional[int] = None
+    copied_keys: dict[str, Any] = Field(default_factory=dict)
+
+
+class PalletReleaseBody(BaseModel):
+    """POST /api/auftraege/{id}/pallets/{idx}/release body. completed=true
+    marks the pallet done (counts toward auto-complete); completed=false
+    just frees it for someone else to pick up."""
+    completed: bool = False
+
+
+class HeartbeatResponse(BaseModel):
+    """POST /api/auftraege/{id}/heartbeat response — how many active claims
+    the caller refreshed (0 means nothing to ping, harmless)."""
+    updated: int
+
+
 class AuftragDetail(AuftragSummary):
     """Full record incl. parsed payload, raw text, and workflow state."""
     raw_text: Optional[str] = None
@@ -373,14 +454,41 @@ class AuftragDetail(AuftragSummary):
     current_item_idx: Optional[int] = None
     completed_keys: dict[str, Any] = Field(default_factory=dict)
     pallet_timings: dict[str, Any] = Field(default_factory=dict)
+    # Per-pallet effective seconds (= work seconds excluding lunch/non-
+    # working hours). Computed from `pallet_timings` against the supplied
+    # `schedule` — falls back to `{}` when no schedule is passed in (e.g.
+    # tests that don't care about effective time).
+    pallet_effective_seconds: dict[str, int] = Field(default_factory=dict)
+
+    # Multi-user session fields (migration e7f8a9b0c1d2).
+    session_users: list[SessionUser] = Field(default_factory=list)
+    user_progress: dict[str, UserPalletProgress] = Field(default_factory=dict)
+    pallet_claims: list[PalletClaimDTO] = Field(default_factory=list)
 
     @classmethod
     def from_orm_row(
         cls,
         row: Auftrag,
         assigned_to_user_name: Optional[str] = None,
+        schedule: Optional[WorkScheduleCfg] = None,
+        pallet_claims: Optional[list[PalletClaimDTO]] = None,
     ) -> AuftragDetail:
-        base = AuftragSummary.from_orm_row(row, assigned_to_user_name)
+        base = AuftragSummary.from_orm_row(row, assigned_to_user_name, schedule)
+        # session_users / user_progress live as raw JSONB; parse into typed
+        # DTOs so the wire response is well-shaped. Tolerant of legacy rows
+        # where the column is None or the entries are missing fields.
+        session_users: list[SessionUser] = []
+        for entry in (row.session_users or []):
+            try:
+                session_users.append(SessionUser(**entry))
+            except Exception:
+                continue
+        user_progress: dict[str, UserPalletProgress] = {}
+        for uid, val in (row.user_progress or {}).items():
+            try:
+                user_progress[str(uid)] = UserPalletProgress(**(val or {}))
+            except Exception:
+                user_progress[str(uid)] = UserPalletProgress()
         return cls(
             **base.model_dump(),
             raw_text=row.raw_text,
@@ -390,6 +498,9 @@ class AuftragDetail(AuftragSummary):
             current_pallet_idx=row.current_pallet_idx,
             current_item_idx=row.current_item_idx,
             completed_keys=row.completed_keys or {},
+            session_users=session_users,
+            user_progress=user_progress,
+            pallet_claims=pallet_claims or [],
         )
 
 
@@ -406,6 +517,10 @@ class LevelBucket(BaseModel):
     units: int
     rollen: int
     auftrag_count: int  # distinct Aufträge that contain ≥1 item of this level
+    # Σ units × price_per_einheit_eur for items with a known price.
+    # Sums to the level's share of `items_value_eur`; null-priced items
+    # contribute 0 but still count against the global coverage_pct.
+    cost_eur: float = 0.0
 
 
 class DailyLevelBucket(BaseModel):
@@ -518,6 +633,29 @@ class LynneAsinRename(BaseModel):
     newAsin: str = Field(..., min_length=1, max_length=20)
 
 
+class WorkScheduleRead(APIModel):
+    """Current warehouse working schedule. Single-row config (id=1)."""
+    work_start: time
+    work_end: time
+    break_start: time
+    break_end: time
+    working_days: list[int] = Field(default_factory=lambda: [1, 2, 3, 4, 5])
+    timezone_name: str = "Europe/Berlin"
+    updated_at: datetime
+    updated_by_user_id: Optional[UUID] = None
+
+
+class WorkSchedulePatch(BaseModel):
+    """PATCH body — any subset of the schedule. `working_days` is the
+    full replacement set (ISO Mon=1..Sun=7), not a delta."""
+    work_start: Optional[time] = None
+    work_end: Optional[time] = None
+    break_start: Optional[time] = None
+    break_end: Optional[time] = None
+    working_days: Optional[list[int]] = Field(default=None)
+    timezone_name: Optional[str] = Field(default=None, max_length=50)
+
+
 class ReportsAggregates(BaseModel):
     """Server-side aggregates for the Berichte analytics widgets.
     The 4 sections (Format-Verteilung, Aktivität-Heatmap, Level-Stack,
@@ -528,3 +666,16 @@ class ReportsAggregates(BaseModel):
     heatmap: list[HeatmapCell] = Field(default_factory=list)
     # Lookback window the server actually applied (clamped to ≤90).
     days: int
+    # KPI roll-ups for the v2.4 Berichte redesign. `articles_total` is
+    # Σ len(items) across completed Aufträge; `units_total` is Σ units;
+    # `items_value_eur` is Σ units × price_per_einheit_eur for the items
+    # that have a price; `items_value_coverage_pct` is the percentage of
+    # items that contributed (price was known). `productivity_units_per_hour`
+    # is units_total / Σ effective_seconds(started_at, finished_at,
+    # schedule) — uses the warehouse schedule so non-working hours are
+    # excluded.
+    articles_total: int = 0
+    units_total: int = 0
+    items_value_eur: float = 0.0
+    items_value_coverage_pct: float = 0.0
+    productivity_units_per_hour: float = 0.0

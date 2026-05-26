@@ -19,10 +19,12 @@ from .routers import (
     history,
     lynne,
     packing,
+    pallet_claims,
     reports,
     search,
     sku_dimensions,
     users,
+    work_schedule,
     xlsx_import,
 )
 
@@ -63,7 +65,7 @@ def _verify_anonymous_safety() -> None:
 _verify_anonymous_safety()
 
 _BOOT_TS = time.time()
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.4.0"
 
 app = FastAPI(title="Pallet Loading Optimizer", version=APP_VERSION)
 
@@ -93,6 +95,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(packing.router, prefix="/api", tags=["packing"])
 app.include_router(xlsx_import.router, prefix="/api", tags=["import"])
 app.include_router(auftraege.router)  # /api/auftraege
+app.include_router(pallet_claims.router)  # /api/auftraege/{id}/join, .../pallets/{idx}/claim, ...
 app.include_router(users.router)      # /api/users, /api/me
 app.include_router(history.router)    # /api/history
 app.include_router(admin.router)      # /api/admin/*
@@ -102,6 +105,7 @@ app.include_router(activity.router)   # /api/activity/live, /api/activity/shift
 app.include_router(exports.router)    # /api/exports/auftraege.xlsx
 app.include_router(reports.router)    # /api/reports/aggregates
 app.include_router(lynne.router)      # /api/lynne/products
+app.include_router(work_schedule.router)  # /api/work-schedule, /api/admin/work-schedule
 
 
 @app.get("/health")

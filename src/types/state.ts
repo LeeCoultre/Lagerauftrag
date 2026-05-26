@@ -7,8 +7,10 @@
 import type {
   AuftragStatus,
   CompletedKeys,
+  PalletClaim,
   Parsed,
   PalletTimings,
+  SessionUser,
   UUID,
   Validation,
   WorkflowAbortPayload,
@@ -48,6 +50,12 @@ export interface LegacyAuftrag {
 
   assignedToUserId: UUID | null | undefined;
   assignedToUserName: string | null | undefined;
+
+  /* Multi-user session fields (beta). Optional — populated for rows
+   * surfaced via the "joinable" selector in useAppState, omitted on
+   * classic single-user paths. */
+  palletClaims?: PalletClaim[];
+  sessionUsers?: SessionUser[];
 }
 
 export interface LegacyHistoryItem {
@@ -99,4 +107,14 @@ export interface UseAppStateApi {
 
   removeHistoryEntry: (id: UUID) => void;
   clearHistory: () => void;
+
+  /** Active in_progress Aufträge held by other workers that still
+   *  have at least one free pallet. Used by Warteschlange to surface
+   *  "Beitreten" rows. Empty in classic single-user usage. */
+  joinable: LegacyAuftrag[];
+  /** Join a not-mine in_progress Auftrag and atomically claim the
+   *  first free pallet. Resolves true on success; false on race / no
+   *  free / 409 (already alerts the user). The caller should navigate
+   *  to workspace on true. */
+  joinAndClaimFirst: (auftragId: UUID) => Promise<boolean>;
 }

@@ -10,6 +10,7 @@ import { useExperiment } from './utils/experiments';
 import { CommandPalette } from './components/CommandPalette.jsx';
 import { T } from './components/ui';
 import { BetaDesignProvider } from './hooks/useBetaDesign';
+import { FocusPresenceProvider } from './hooks/useFocusPresence';
 import { ConfirmDialogProvider } from './components/ConfirmDialog';
 
 /* Stale-deploy resilience for code-split chunks.
@@ -103,12 +104,14 @@ export default function App() {
   const [islandEnabled] = useExperiment('dynamicIsland');
   return (
     <BetaDesignProvider>
-      <ConfirmDialogProvider>
-        <AppStateProvider>
-          <Router />
-          {islandEnabled && <DynamicIsland />}
-        </AppStateProvider>
-      </ConfirmDialogProvider>
+      <FocusPresenceProvider>
+        <ConfirmDialogProvider>
+          <AppStateProvider>
+            <Router />
+            {islandEnabled && <DynamicIsland />}
+          </AppStateProvider>
+        </ConfirmDialogProvider>
+      </FocusPresenceProvider>
     </BetaDesignProvider>
   );
 }

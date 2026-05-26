@@ -27,7 +27,9 @@ import type {
   AuftragDetail,
   AuftragReorderItem,
   AuftragSummary,
+  HeartbeatResponse,
   HistoryPage,
+  PalletReleaseBody,
   LynneAsinBatchPatch,
   LynneAsinGroup,
   LynneAsinRename,
@@ -50,6 +52,8 @@ import type {
   UserRole,
   WorkflowAbortPayload,
   WorkflowProgressPatch,
+  WorkSchedule,
+  WorkSchedulePatchPayload,
   XlsxExportRange,
   XlsxExportResult,
 } from './types/api';
@@ -76,6 +80,13 @@ const OPAQUE = new Set<string>([
   'copied_keys', 'copiedKeys',
   'pallet_timings', 'palletTimings',
   'meta',
+  /* user_progress is keyed by user UUID. The OUTER map's keys are not
+   * snake_case — leaving them opaque preserves them verbatim, but we
+   * still want the INNER objects' keys (current_pallet_idx etc.) to
+   * convert. The OPAQUE set short-circuits the recursion entirely, so
+   * downstream consumers receive raw inner shapes. The beta Focus
+   * screen handles this by reading both snake/camel variants. */
+  'user_progress', 'userProgress',
 ]);
 
 function snakeKeyToCamel(k: string): string {
@@ -152,7 +163,7 @@ export const listUsers = (): Promise<UserListItem[]> => call('GET', '/api/users'
 export const getMe     = (): Promise<UserResponse>   => call('GET', '/api/me');
 
 /* ─── Auftraege ─────────────────────────────────────── */
-export const listAuftraege = (): Promise<AuftragSummary[]>                       => call('GET', '/api/auftraege');
+export const listAuftraege = (): Promise<AuftragDetail[]>                        => call('GET', '/api/auftraege');
 export const createAuftrag = (payload: AuftragCreatePayload): Promise<AuftragDetail> => call('POST', '/api/auftraege', payload);
 export const getAuftrag    = (id: UUID): Promise<AuftragDetail>                  => call('GET',  `/api/auftraege/${id}`);
 export const deleteAuftrag = (id: UUID): Promise<null>                           => call('DELETE', `/api/auftraege/${id}`);
@@ -163,6 +174,21 @@ export const updateProgress  = (id: UUID, p: WorkflowProgressPatch): Promise<Auf
 export const completeAuftrag = (id: UUID): Promise<AuftragDetail>                       => call('POST',  `/api/auftraege/${id}/complete`);
 export const cancelAuftrag   = (id: UUID): Promise<AuftragDetail>                       => call('POST',  `/api/auftraege/${id}/cancel`);
 export const abortAuftrag    = (id: UUID, payload: WorkflowAbortPayload): Promise<AuftragDetail> => call('POST',  `/api/auftraege/${id}/abort`, payload);
+
+/* ─── Multi-user session (beta) ──────────────────────
+ * Beta Focus lets several workers share an in_progress Auftrag while
+ * each pallet stays single-owner. `claimPallet` is race-safe — backend
+ * uses a partial unique index, so a parallel claim from another worker
+ * surfaces here as ApiError(409). `heartbeat` should be called every
+ * 30 s while the caller holds at least one active claim; stale claims
+ * (>5 min idle) become available for `takeoverPallet`. */
+export const joinSession    = (id: UUID): Promise<AuftragDetail>                            => call('POST', `/api/auftraege/${id}/join`);
+export const leaveSession   = (id: UUID): Promise<AuftragDetail>                            => call('POST', `/api/auftraege/${id}/leave`);
+export const claimPallet    = (id: UUID, palletIdx: number): Promise<AuftragDetail>         => call('POST', `/api/auftraege/${id}/pallets/${palletIdx}/claim`);
+export const releasePallet  = (id: UUID, palletIdx: number, completed = false): Promise<AuftragDetail> =>
+  call('POST', `/api/auftraege/${id}/pallets/${palletIdx}/release`, { completed } as PalletReleaseBody);
+export const takeoverPallet = (id: UUID, palletIdx: number): Promise<AuftragDetail>         => call('POST', `/api/auftraege/${id}/pallets/${palletIdx}/takeover`);
+export const heartbeat      = (id: UUID): Promise<HeartbeatResponse>                        => call('POST', `/api/auftraege/${id}/heartbeat`);
 
 /* ─── History ───────────────────────────────────────── */
 export const getHistory = (limit = 50, offset = 0): Promise<HistoryPage> =>
@@ -286,6 +312,17 @@ export const downloadAuftraegeXlsx = async ({ from, to }: XlsxExportRange = {}):
   URL.revokeObjectURL(url);
   return { ok: true, rowCount };
 };
+
+/* ─── Work schedule (warehouse hours + break + working days) ─────────
+ * Read endpoint is auth-only — the live Focus timer + Historie expand
+ * both depend on it. Write is admin-gated; Admin → Arbeitszeit is the
+ * sole editor. Mutations invalidate ['workSchedule'] so every active
+ * useWorkSchedule() consumer immediately picks up the new window. */
+export const getWorkSchedule = (): Promise<WorkSchedule> =>
+  call('GET', '/api/work-schedule');
+
+export const adminUpdateWorkSchedule = (payload: WorkSchedulePatchPayload): Promise<WorkSchedule> =>
+  call('PATCH', '/api/admin/work-schedule', payload);
 
 /* ─── SKU Dimensions (lookup is auth, admin endpoints require role) ─── */
 

@@ -15,16 +15,20 @@
 import { createContext, useCallback, useMemo, useState, type ReactNode } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useFocusActive } from './hooks/useFocusPresence';
 import mammoth from 'mammoth';
 import {
   parseLagerauftragText, validateParsing,
 } from './utils/parseLagerauftrag.js';
 import { sortPallets, enrichItemDims } from './utils/auftragHelpers.js';
+import { scanFnskuCodesZoned } from './utils/fnskuScanner';
+import { validateFnskuAgainstParserZoned } from './utils/fnskuValidator';
 import {
   listAuftraege, createAuftrag, getAuftrag, deleteAuftrag, reorderQueue as apiReorder,
   startAuftrag, updateProgress, completeAuftrag, cancelAuftrag, abortAuftrag,
   getHistory, deleteHistoryEntry, getMe,
   lookupSkuDimensions,
+  joinSession, claimPallet,
   ApiError,
 } from './marathonApi';
 import type {
@@ -34,6 +38,7 @@ import type {
   AuftragReorderItem,
   CompletedKeys,
   PalletTimings,
+  Parsed,
   UUID,
   WorkflowAbortPayload,
   WorkflowProgressPatch,
@@ -143,6 +148,11 @@ export function toLegacy(a: AuftragDetail | AuftragSummary | null | undefined): 
 
     assignedToUserId:   a.assignedToUserId,
     assignedToUserName: a.assignedToUserName,
+
+    // Multi-user fields — only present on Detail rows; let consumers
+    // (Warteschlange's JoinableBanner) compute free-pallet counts.
+    palletClaims: detail.palletClaims,
+    sessionUsers: detail.sessionUsers,
   };
 }
 
@@ -172,7 +182,19 @@ async function parseDocxFile(file: File) {
     rawText = r.value;
     const parsed = parseLagerauftragText(rawText);
     if (parsed?.pallets) parsed.pallets = sortPallets(parsed.pallets);
-    const validation = validateParsing(rawText, parsed);
+    const baseValidation = (validateParsing(rawText, parsed) || {}) as Record<string, unknown>;
+    /* Independent FNSKU scanner — second pass over the raw text, no
+       columnar assumptions. v2: scanner partitions hits by palette
+       block (own palette regex, not imported from parseLagerauftrag),
+       and the validator surfaces per-palette count mismatches. Result
+       is stashed under validation.fnsku so it round-trips through the
+       backend's opaque JSON blob and survives a refresh without any
+       schema/migration change. */
+    const fnskuScan = scanFnskuCodesZoned(rawText);
+    const validation = {
+      ...baseValidation,
+      fnsku: validateFnskuAgainstParserZoned(fnskuScan, parsed as unknown as Parsed),
+    };
     return { fileName: file.name, rawText, parsed, validation, errorMessage: null };
   } catch (e) {
     return {
@@ -203,10 +225,22 @@ export function useAppState(): UseAppStateApi {
     retry: false,
   });
 
+  /* Beta Focus polling: while the user is on the multi-user Focus
+   * screen, refetch every 3 s so peer claims, heartbeats, and progress
+   * propagate without manual invalidate. Everywhere else (classic
+   * Focus, Pruefen, Upload, Historie, …) the query stays invalidate-
+   * driven — same behaviour the app had before multi-user. */
+  const focusActive = useFocusActive();
   const auftraegeQ = useQuery({
     queryKey: ['auftraege'],
     queryFn: listAuftraege,
     enabled: !!effectivelySignedIn,
+    refetchInterval:
+      focusActive && typeof document !== 'undefined'
+        && document.visibilityState === 'visible'
+        ? 3000
+        : false,
+    refetchIntervalInBackground: false,
   });
 
   const historyQ = useQuery({
@@ -215,8 +249,12 @@ export function useAppState(): UseAppStateApi {
     enabled: !!effectivelySignedIn,
   });
 
-  const all: AuftragSummary[] = auftraegeQ.data ?? [];
-  void meQ;  // me is currently unused — kept query active for future role-gated UI.
+  /* Backend returns AuftragDetail for the list endpoint — slim for
+     non-active rows (parsed/raw_text stripped), full for the caller's
+     own active row. Typed as Detail so the multi-user-aware fields
+     (palletClaims, sessionUsers) are readable; legacy Summary callers
+     still work via structural typing. */
+  const all: AuftragDetail[] = auftraegeQ.data ?? [];
 
   const queue = useMemo(
     () => all
@@ -226,14 +264,31 @@ export function useAppState(): UseAppStateApi {
     [all],
   );
 
-  /* Backend's GET /api/auftraege already filters in_progress to only this
-     user's row. We don't need the redundant `assignedToUserId === me?.id`
-     check here — and it was actively harmful: if `me` was still loading
-     (Clerk session not yet populated), the filter never matched and the
-     UI never switched to Pruefen after a successful Start. */
+  /* Backend's GET /api/auftraege returns ALL in_progress Aufträge now
+     (peek-only payload for not-mine rows) — multi-user discovery needs
+     it so non-members can see active sessions in Warteschlange and
+     join. Pick MY active row by primary or session membership; fall
+     back to "any in_progress" while `me` is loading so the UI still
+     transitions on first start (Clerk session populates async). */
+  const meId = meQ.data?.id;
   const currentSrc = useMemo(
-    () => all.find((a) => a.status === 'in_progress') ?? null,
-    [all],
+    () => {
+      if (!meId) {
+        // `me` not yet loaded — backend now returns ALL in_progress
+        // (peek-payload), so we MUST NOT pick the first one as ours;
+        // doing so would render another worker's pallet as "my current".
+        // Wait for Clerk to populate `me`; UI shows the queue meanwhile.
+        return null;
+      }
+      return all.find((a) =>
+        a.status === 'in_progress'
+        && (
+          a.assignedToUserId === meId
+          || (a.sessionUsers ?? []).some((u) => u.userId === meId)
+        ),
+      ) ?? null;
+    },
+    [all, meId],
   );
   const [copiedKeysVersion, setCopiedKeysVersion] = useState(0);
   const [eskuOverridesVersion, setEskuOverridesVersion] = useState(0);
@@ -354,10 +409,28 @@ export function useAppState(): UseAppStateApi {
     },
     onError: (err, _id, ctx) => {
       if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
-      const msg = err instanceof Error
-        ? err.message
-        : 'Auftrag konnte nicht gestartet werden.';
-      alert(msg);
+      const status = (err as ApiError | null)?.status;
+      const detail = (err as ApiError | null)?.detail;
+      const detailStr = typeof detail === 'string' ? detail : '';
+      const lower = detailStr.toLowerCase();
+      if (status === 409 && lower.includes('already taken')) {
+        /* Race with another worker who started the same row a few ms
+           earlier. The polling refetch will move the row out of queue
+           — no toast needed, the UI self-corrects. */
+      } else if (status === 409 && lower.includes('another auftrag in progress')) {
+        /* Server-side "one active per user" guard fired because our
+           frontend guard missed (e.g. cache hadn't caught up yet).
+           Surface a friendly message instead of the raw EN string. */
+        alert(
+          'Du hast bereits einen aktiven Auftrag. Schließe ihn ab oder ' +
+          'breche ihn ab, bevor du einen neuen startest.'
+        );
+      } else {
+        const msg = err instanceof Error
+          ? err.message
+          : 'Auftrag konnte nicht gestartet werden.';
+        alert(msg);
+      }
       invalidateAll();
     },
   });
@@ -481,6 +554,37 @@ export function useAppState(): UseAppStateApi {
       );
       return;
     }
+    /* Defence against "current is still loading" gap: until `me` is
+       populated, `currentSrc` is null even if the user does have an
+       active Auftrag on the server. Without this check, click→/start
+       would bypass the frontend guard and the backend would respond
+       409 "another in progress" — confusing for the worker. Better
+       to wait a beat. */
+    if (!meId) {
+      alert('Profil wird noch geladen. Bitte einen Moment warten.');
+      return;
+    }
+    /* Server-side cross-check: maybe a row exists where I'm primary or
+       a participant that simply hasn't reached the `current` slot yet
+       (e.g. multi-user-aware row in the cache that didn't pass the
+       in_progress filter due to race). Block here with a friendly
+       hint instead of letting the backend 409 leak through. */
+    const detailList = qc.getQueryData<AuftragDetail[]>(['auftraege']) ?? [];
+    const myActive = detailList.find((a) =>
+      a.status === 'in_progress'
+      && (
+        a.assignedToUserId === meId
+        || (a.sessionUsers ?? []).some((u) => u.userId === meId)
+      ),
+    );
+    if (myActive) {
+      alert(
+        'Du hast bereits einen aktiven Auftrag (' +
+        (myActive.fileName || myActive.fbaCode || myActive.id) +
+        '). Schließe ihn ab oder breche ihn ab, bevor du einen neuen startest.'
+      );
+      return;
+    }
     /* Strict order: only the queue head (first non-error row) may start.
        Error rows are skipped so a single broken parse doesn't lock the
        rest of the shift. Smart-sort / DnD remain the way to reorder. */
@@ -493,6 +597,22 @@ export function useAppState(): UseAppStateApi {
     }
     const target = entryId || headId || queue[0]?.id;
     if (!target) return;
+
+    /* Guard against stale-cache double-start: the row may already be
+       in_progress on the server (a polling refetch will surface that
+       state momentarily). Without this, /start returns 409 "Already
+       taken" and the worker is left confused. Reuse the detailList
+       grabbed above for the membership check. */
+    const targetDetail = detailList.find((a) => a.id === target);
+    if (targetDetail && targetDetail.status === 'in_progress') {
+      // Either I'm the primary returning to my row (back-button reload
+      // mid-flow) or someone beat me to it. Backend's idempotent /start
+      // handles the first case gracefully; for the second, we'd 409.
+      // Skip the API call entirely and let the caller's UI react to the
+      // cache (Workspace already renders my own in_progress as current).
+      qc.invalidateQueries({ queryKey: ['auftraege'] });
+      return;
+    }
 
     /* Pre-warm the sku-dimensions query so Pruefen mounts with the
        lookup already inflight (or done). Uses the same queryKey
@@ -643,6 +763,79 @@ export function useAppState(): UseAppStateApi {
     history.forEach((h) => deleteHistMut.mutate(h.id));
   }, [history, deleteHistMut]);
 
+  /* ── Multi-user join discovery (beta) ────────────────────────────────
+     Aufträge in_progress that aren't mine — surfaced in Warteschlange
+     as "Beitreten" rows when there's a free pallet I can claim. The
+     server returns these with parsed=null (peek-only), so we read just
+     pallet_claims to compute free slots. */
+  const joinable = useMemo<LegacyAuftrag[]>(
+    () => {
+      if (!meId) return [];
+      return all
+        .filter((a) => {
+          if (a.status !== 'in_progress') return false;
+          if (a.assignedToUserId === meId) return false;
+          if ((a.sessionUsers ?? []).some((u) => u.userId === meId)) return false;
+          const palletCount = a.palletCount ?? 0;
+          if (palletCount === 0) return false;
+          const occupied = new Set(
+            (a.palletClaims ?? [])
+              .filter((c) => c.state === 'active' || c.state === 'completed')
+              .map((c) => c.palletIdx),
+          );
+          return occupied.size < palletCount;
+        })
+        .map(toLegacy)
+        .filter((x): x is LegacyAuftrag => x != null);
+    },
+    [all, meId],
+  );
+
+  /* Join a not-mine in_progress Auftrag + immediately claim the first
+     free pallet. Returns true if both succeeded — the caller then
+     navigates to workspace to enter Focus. */
+  const joinAndClaimFirst = useCallback(async (auftragId: UUID): Promise<boolean> => {
+    const row = all.find((a) => a.id === auftragId);
+    if (!row || row.status !== 'in_progress') return false;
+    const palletCount = row.palletCount ?? 0;
+    if (palletCount === 0) return false;
+    const occupied = new Set(
+      (row.palletClaims ?? [])
+        .filter((c) => c.state === 'active' || c.state === 'completed')
+        .map((c) => c.palletIdx),
+    );
+    let nextFree: number | null = null;
+    for (let i = 0; i < palletCount; i++) {
+      if (!occupied.has(i)) { nextFree = i; break; }
+    }
+    if (nextFree == null) return false;
+    try {
+      await joinSession(auftragId);
+    } catch (e) {
+      /* 409 — already in another active session, or session full.
+         Surface via alert; UI stays on Warteschlange. */
+      const msg = e instanceof Error ? e.message : 'Beitreten fehlgeschlagen.';
+      alert(msg);
+      return false;
+    }
+    try {
+      await claimPallet(auftragId, nextFree);
+    } catch (e) {
+      /* 409 race: a parallel worker grabbed the slot. Invalidate the
+         cache so the polling cycle surfaces the next free pallet on the
+         caller's next click. Don't keep retrying inline — would block
+         the click handler arbitrarily long. */
+      qc.invalidateQueries({ queryKey: ['auftraege'] });
+      const status = e instanceof ApiError ? e.status : 0;
+      alert(status === 409
+        ? 'Diese Palette wurde gerade übernommen. Bitte erneut tippen.'
+        : (e instanceof Error ? e.message : 'Übernehmen fehlgeschlagen.'));
+      return false;
+    }
+    qc.invalidateQueries({ queryKey: ['auftraege'] });
+    return true;
+  }, [all, qc]);
+
   return useMemo<UseAppStateApi>(() => ({
     queue, current, history,
     addFiles, removeFromQueue, reorderQueue: reorderQueueAction, reorderQueueTo, clearQueue,
@@ -651,6 +844,7 @@ export function useAppState(): UseAppStateApi {
     moveEskuToPallet, resetEskuOverrides,
     completeCurrentItem, completeAndAdvance, cancelCurrent, abortCurrent,
     removeHistoryEntry, clearHistory,
+    joinable, joinAndClaimFirst,
   }), [
     queue, current, history,
     addFiles, removeFromQueue, reorderQueueAction, reorderQueueTo, clearQueue,
@@ -659,5 +853,6 @@ export function useAppState(): UseAppStateApi {
     moveEskuToPallet, resetEskuOverrides,
     completeCurrentItem, completeAndAdvance, cancelCurrent, abortCurrent,
     removeHistoryEntry, clearHistory,
+    joinable, joinAndClaimFirst,
   ]);
 }

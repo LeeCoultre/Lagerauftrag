@@ -40,6 +40,8 @@ import {
 import { lookupSkuDimensions } from '@/marathonApi.js';
 import { detectWiederholt } from '@/utils/wiederholtLogic.js';
 import { useBetaDesign } from '@/hooks/useBetaDesign';
+import { useWorkSchedule } from '@/hooks/useWorkSchedule';
+import { effectiveElapsedMs, workPhaseAt, formatTimeInTz } from '@/utils/workTime';
 import { Page, Topbar, Button, Badge, StudioFrame, T } from '@/components/ui.jsx';
 import PalletInterlude, { resetSkipCount } from '@/components/PalletInterlude.jsx';
 import AuftragFinaleStage from '@/components/AuftragFinaleStage.jsx';
@@ -47,6 +49,11 @@ import EskuMovePopover from '@/components/EskuMovePopover.jsx';
 import CancelAuftragModal from '@/components/CancelAuftragModal';
 import { useConfirm } from '@/components/ConfirmDialog';
 import BoxIso from '@/components/BoxIso';
+import { useDeclareFocusActive } from '@/hooks/useFocusPresence';
+import { useFocusSession } from '@/hooks/useSession';
+import { useMe } from '@/hooks/useMe';
+import { useQueryClient } from '@tanstack/react-query';
+import type { AuftragDetail as AuftragDetailT } from '@/types/api';
 
 const SCHNELL_KEY = 'marathon.focus.schnellmodus';
 const DOPPEL_KEY  = 'marathon.focus.doppelmodus';
@@ -67,15 +74,37 @@ function shortPalletId(p) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════ */
+/* Focus = Schritt 03 single-pallet workflow. Visual design driven by
+   `useBetaDesign()` — classic vs. beta branches live inline within this
+   one component (FlowHero/BetaIslandBar etc.). Multi-user behaviour is
+   layered on top transparently: when beta is on, auto-claim happens in
+   the background; UI looks identical to single-user. See useMultiUserFocus
+   below for the session integration. */
 export default function FocusScreen() {
   const {
     current,
-    setCurrentPalletIdx, setCurrentItemIdx, markCodeCopied,
+    setCurrentPalletIdx: setCurrentPalletIdxRaw,
+    setCurrentItemIdx, markCodeCopied,
     moveEskuToPallet,
     completeCurrentItem, cancelCurrent, abortCurrent, goToStep,
   } = useAppState();
   const [stornoOpen, setStornoOpen] = useState(false);
   const { beta: betaDesign } = useBetaDesign();
+  // Multi-user session is gated on beta — auto-claim, transition
+  // override and polling all live inside useMultiUserFocus. The hook
+  // returns a thin handle the rest of FocusScreen consults at the few
+  // touch points where pallet navigation differs from single-user.
+  const session = useMultiUserFocus(current?.id ?? null, betaDesign);
+  /* In beta + multi-user the worker is locked to whichever pallet
+     they currently own — no manual hopping to a neighbour, which
+     would step on another worker's claim. We shadow the global
+     setCurrentPalletIdx with a guard so every callsite below
+     (keyboard handlers, chip clicks, cross-pallet item-flow)
+     becomes a no-op when a claim is held. */
+  const setCurrentPalletIdx = useCallback((idx: number) => {
+    if (session.hasClaim) return;
+    setCurrentPalletIdxRaw(idx);
+  }, [session.hasClaim, setCurrentPalletIdxRaw]);
   const confirm = useConfirm();
   const fbaCode = current?.fbaCode || current?.parsed?.meta?.sendungsnummer || current?.fileName || '';
   const eskuOverrides = current?.eskuOverrides || {};
@@ -139,7 +168,12 @@ export default function FocusScreen() {
     [enrichedSourcePallets, distribution],
   );
 
-  const palletIdx = Math.min(current?.currentPalletIdx ?? 0, Math.max(0, rawPallets.length - 1));
+  /* In beta + multi-user, the worker's pallet is whichever one they
+     currently own (session.palletIdxOverride). Outside beta or before
+     auto-claim resolves, fall back to the shared current_pallet_idx
+     field — same source-of-truth as before multi-user. */
+  const palletIdxRaw = session.palletIdxOverride ?? current?.currentPalletIdx ?? 0;
+  const palletIdx = Math.min(palletIdxRaw, Math.max(0, rawPallets.length - 1));
   const itemIdx   = current?.currentItemIdx ?? 0;
   const completedKeysObj = current?.completedKeys || {};
 
@@ -568,6 +602,31 @@ export default function FocusScreen() {
       return;
     }
     const wasLastOfPallet = isLastItemOfPallet;
+
+    /* Multi-user transition (beta only, when we hold a claim): instead
+       of advancing currentPalletIdx via classic auto-next, we release
+       our pallet as completed and immediately claim the next free one.
+       Backend auto-completes the whole Auftrag once the last pallet is
+       released — polling then routes us to Abschluss. */
+    if (wasLastOfPallet && session.hasClaim) {
+      /* Write the final item's completedKeys without changing pallet
+         position; the release call below is the source-of-truth for
+         pallet ownership. */
+      completeCurrentItem(rawPallet.items.length, rawItem, palletIdx);
+      void (async () => {
+        const advanced = await session.releaseAndClaimNext(palletIdx);
+        if (!advanced) {
+          /* No more free pallets. Either backend auto-completed (poll
+             will route us), or every remaining pallet is held by another
+             worker. Show the finale gate so the UI doesn't sit blank. */
+          setFinalePending(true);
+        } else {
+          setInterlude(buildInterludePayload(palletIdx));
+        }
+      })();
+      return;
+    }
+
     // "Last of Auftrag" follows the display order, not raw indices, so
     // a reorder like P1 > P3 > P2 ends the auftrag after P2 (the last
     // visible pallet) instead of after the last raw pallet.
@@ -585,7 +644,7 @@ export default function FocusScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawPallet, rawItem, rawPallets, palletIdx, itemIdx, isLastItemOfPallet,
       allPalletCopied, copiedKeys, completeCurrentItem, buildInterludePayload,
-      nextDisplayPalletRawIdx]);
+      nextDisplayPalletRawIdx, session.hasClaim, session.releaseAndClaimNext]);
 
   /* Wiederholt hit for the CURRENT article — computed per position so the
      hero card can flag it (badge) and the overlay can fire on first copy.
@@ -1373,7 +1432,11 @@ function ArticleHeroCard({
   const isMoved = item.isEsku && !!(eskuOverrides && moveKey && eskuOverrides[moveKey]);
 
   /* Live timer — re-renders once per second so the elapsed string stays
-     fresh. Re-bound only when the pallet's startedAt changes. */
+     fresh. The displayed value is EFFECTIVE working seconds: outside
+     the warehouse window or during the 12:00–12:30 lunch, the tick
+     visually freezes because `effectiveElapsedMs` stops accumulating.
+     Re-bound only when the pallet's startedAt changes. */
+  const { schedule: workSchedule } = useWorkSchedule();
   const [, forceTick] = useState(0);
   useEffect(() => {
     if (!palletStartedAt) return undefined;
@@ -1381,7 +1444,9 @@ function ArticleHeroCard({
     return () => clearInterval(id);
   }, [palletStartedAt]);
 
-  const elapsedSec = palletStartedAt ? Math.max(0, Math.floor((Date.now() - palletStartedAt) / 1000)) : 0;
+  const elapsedSec = palletStartedAt
+    ? Math.floor(effectiveElapsedMs(palletStartedAt, Date.now(), workSchedule) / 1000)
+    : 0;
   const elapsedLabel = formatElapsedTimer(elapsedSec);
 
   return (
@@ -2522,19 +2587,34 @@ function BetaTopPill({
   };
 
   /* Live elapsed counter — ticks every second while the auftrag is
-     running. Replaces the static «FBA» label that used to sit before
-     the code, giving the worker a constant readout of how long the
-     order has been in progress. */
-  const [, forceTick] = useState(0);
+     running. The value is EFFECTIVE working seconds (lunch + non-work
+     hours subtracted), so the badge naturally freezes at 12:00 and
+     resumes at 12:30 without any extra state to wire up. */
+  const { schedule: workSchedule } = useWorkSchedule();
+  const [tick, forceTick] = useState(0);
   useEffect(() => {
     if (!startedAt) return undefined;
     const id = window.setInterval(() => forceTick((n) => n + 1), 1000);
     return () => window.clearInterval(id);
   }, [startedAt]);
+  void tick; // pure re-render trigger
+  const nowMs = Date.now();
   const elapsedSec = startedAt
-    ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+    ? Math.floor(effectiveElapsedMs(startedAt, nowMs, workSchedule) / 1000)
     : 0;
   const elapsedLabel = formatElapsedTimer(elapsedSec);
+  const phaseInfo = workPhaseAt(nowMs, workSchedule);
+  const isPaused = !!startedAt && phaseInfo.phase !== 'working';
+  const pauseChipLabel = (() => {
+    if (!isPaused) return null;
+    if (phaseInfo.phase === 'lunch' && phaseInfo.nextResumeMs) {
+      return `Pause bis ${formatTimeInTz(phaseInfo.nextResumeMs, workSchedule.tz)}`;
+    }
+    return 'Außerhalb der Arbeitszeit';
+  })();
+  const pauseTooltip = phaseInfo.nextResumeMs
+    ? `Timer pausiert · läuft weiter ab ${formatTimeInTz(phaseInfo.nextResumeMs, workSchedule.tz)}`
+    : 'Timer pausiert · außerhalb der Arbeitszeit';
 
   if (!fba) return null;
 
@@ -2621,18 +2701,54 @@ function BetaTopPill({
         paddingLeft: onGoToPruefen ? 8 : 0,
       }}>
         <span
-          title={`Auftrag-Dauer · läuft seit ${elapsedLabel}`}
+          title={isPaused ? pauseTooltip : `Auftrag-Dauer · läuft seit ${elapsedLabel}`}
           style={{
             fontFamily: T.font.mono,
             fontSize: 12.5,
             fontWeight: 700,
-            color: 'var(--accent)',
+            color: isPaused ? T.text.subtle : 'var(--accent)',
             letterSpacing: '0.02em',
             fontVariantNumeric: 'tabular-nums',
+            transition: 'color 200ms ease',
           }}
         >
           {elapsedLabel}
         </span>
+        {/* Pause indicator — beta-only chip surfaces when the warehouse
+            schedule says we're outside work hours or mid-break. The timer
+            naturally freezes (effectiveElapsedMs returns the same value
+            on each tick); this chip just explains the freeze and shows
+            when the timer will resume. */}
+        {pauseChipLabel && (
+          <span
+            title={pauseTooltip}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              padding: '2px 8px 2px 6px',
+              marginLeft: 2,
+              borderRadius: 999,
+              fontFamily: T.font.ui,
+              fontSize: 10.5,
+              fontWeight: 600,
+              letterSpacing: '-0.005em',
+              color: T.text.subtle,
+              background: T.bg.surface2,
+              border: `1px solid ${T.border.primary}`,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <span aria-hidden style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: T.text.subtle,
+              animation: 'pulse 2s ease-in-out infinite',
+            }} />
+            {pauseChipLabel}
+          </span>
+        )}
         <span aria-hidden style={{ color: T.border.strong, fontFamily: T.font.mono }}>·</span>
         <button
           type="button"
@@ -6777,4 +6893,111 @@ function fallbackCopy(text) {
   } catch {
     /* ignore */
   }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Multi-user session integration (beta only).
+
+   Visually invisible: the worker never sees peer badges, a free-pallet
+   grid, or a "pick a pallet" dialog. Backend assigns them a pallet,
+   they work it like single-user, and when they finish it we release
+   and auto-claim the next one in the background.
+
+   Returns a thin handle FocusScreen consults at three points:
+     - palletIdxOverride : when set, overrides current.currentPalletIdx
+                           so the displayed pallet is always the one
+                           we currently own
+     - hasClaim          : tells handleFertig whether to use the
+                           multi-user transition (release + claim_next)
+                           instead of the classic next-pallet advance
+     - releaseAndClaimNext(idx) : marks `idx` as completed and claims
+                           the first remaining free pallet. Returns
+                           true if a next pallet was claimed; false
+                           when no free pallets remain (then backend
+                           auto-completes and Workspace routes to
+                           Abschluss via polling).
+
+   When `enabled` is false (classic mode), the hook returns a no-op
+   handle so single-user behaviour is byte-identical to the pre-
+   multi-user version. */
+function useMultiUserFocus(
+  auftragId: string | null,
+  enabled: boolean,
+): {
+  hasClaim: boolean;
+  palletIdxOverride: number | null;
+  releaseAndClaimNext: (palletIdx: number) => Promise<boolean>;
+} {
+  const qc = useQueryClient();
+  const me = useMe().data;
+  const meId = me?.id ?? null;
+  /* Polling only runs while we declare focus-active. Mounting this
+     hook unconditionally would also flip the flag for classic users;
+     gate via `enabled` so classic stays invalidate-driven. */
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  if (enabled) useDeclareFocusActive();
+
+  /* Read current AuftragDetail from the ['auftraege'] cache the global
+     useAppState query maintains. Polling refetches (3 s while focus-
+     active) keep this fresh — we just read, don't write. */
+  const list = (qc.getQueryData<AuftragDetailT[]>(['auftraege']) ?? []);
+  const auftrag = (auftragId
+    ? list.find((a) => a.id === auftragId) ?? null
+    : null);
+  const session = useFocusSession(enabled ? auftrag : null);
+
+  const myClaim = enabled ? session.myClaim : null;
+  const hasClaim = !!myClaim;
+  const palletIdxOverride = myClaim ? myClaim.palletIdx : null;
+  const firstFree = session.freeIdxs[0];
+
+  /* Auto-claim first free pallet on mount or whenever we lose our claim.
+     Guards:
+       - enabled (beta only)
+       - auftrag loaded and still in_progress
+       - I have no active claim
+       - There IS a free pallet (otherwise nothing to do; backend will
+         auto-complete once peers finish theirs)
+     The claim() call returns 409 if a parallel worker beat us; the
+     next 3-second poll will surface a different free slot we can try.
+     We don't retry in-effect to avoid hot loops. */
+  useEffect(() => {
+    if (!enabled || !auftrag || !meId) return;
+    if (auftrag.status !== 'in_progress') return;
+    if (hasClaim) return;
+    if (firstFree == null) return;
+    session.claim(firstFree).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, auftragId, meId, hasClaim, firstFree, auftrag?.status]);
+
+  const releaseAndClaimNext = useCallback(async (palletIdx: number): Promise<boolean> => {
+    if (!enabled || !auftrag) return false;
+    /* release(completed=true) flips the claim row to 'completed' and
+       triggers backend auto-complete check. The response is the fresh
+       AuftragDetail. Read the resulting freeIdxs by inspecting its
+       palletClaims — anything not in state='active' or 'completed' is
+       fair game. */
+    const after = await session.release(palletIdx, true).catch(() => null);
+    if (!after) return false;
+    if (after.status === 'completed') {
+      /* Backend just auto-completed the whole Auftrag — Workspace
+         will route to Abschluss on the next poll. Nothing to claim. */
+      return false;
+    }
+    const palletCount = after.parsed?.pallets?.length ?? 0;
+    const occupied = new Set(
+      (after.palletClaims ?? [])
+        .filter((c) => c.state === 'active' || c.state === 'completed')
+        .map((c) => c.palletIdx),
+    );
+    let next: number | null = null;
+    for (let i = 0; i < palletCount; i++) {
+      if (!occupied.has(i)) { next = i; break; }
+    }
+    if (next == null) return false;
+    await session.claim(next).catch(() => undefined);
+    return true;
+  }, [enabled, auftrag, session]);
+
+  return { hasClaim, palletIdxOverride, releaseAndClaimNext };
 }

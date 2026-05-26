@@ -126,6 +126,11 @@ export interface AuftragSummary {
   finishedAt: ISODateString | null;
   durationSec: number | null;
   palletTimings: PalletTimings;
+  /** Per-pallet effective working seconds, keyed by pallet.id.
+   *  Populated when the backend resolves the request against the
+   *  active work schedule (Historie, /api/auftraege list, detail).
+   *  Empty `{}` on endpoints that don't pass the schedule. */
+  palletEffectiveSeconds: Record<string, number>;
 }
 
 export interface AuftragDetail extends AuftragSummary {
@@ -136,6 +141,58 @@ export interface AuftragDetail extends AuftragSummary {
   currentPalletIdx: number | null;
   currentItemIdx: number | null;
   completedKeys: CompletedKeys;
+  /* Multi-user session state (filled only for in_progress rows).
+   * Optional so callers building mock AuftragDetail objects in tests
+   * don't have to spell out empty arrays/maps; backend always returns
+   * concrete values, so prod code can rely on `?? []` / `?? {}`.
+   *
+   * `palletClaims` lists who currently owns / has completed each pallet.
+   * `sessionUsers` is the membership array (primary + participants).
+   * `userProgress` is a per-user cursor map keyed by user UUID — its keys
+   * must NOT be camel-converted, so the field is in the OPAQUE set. */
+  palletClaims?: PalletClaim[];
+  sessionUsers?: SessionUser[];
+  userProgress?: Record<UUID, UserPalletProgress>;
+}
+
+export type PalletClaimState = 'active' | 'released' | 'completed' | 'taken_over';
+
+export interface PalletClaim {
+  palletIdx: number;
+  userId: UUID;
+  userName: string;
+  state: PalletClaimState;
+  claimedAt: ISODateString;
+  heartbeatAt: ISODateString;
+  releasedAt: ISODateString | null;
+  /** Server-computed: now - heartbeatAt > 5 min AND state='active'. */
+  isStale: boolean;
+}
+
+export type SessionRole = 'primary' | 'participant';
+
+export interface SessionUser {
+  userId: UUID;
+  name: string;
+  role: SessionRole;
+  joinedAt: ISODateString;
+  lastSeenAt: ISODateString;
+}
+
+export interface UserPalletProgress {
+  currentPalletIdx?: number | null;
+  currentItemIdx?: number | null;
+  /** Per-user "green chip" map for the beta Focus screen. Same key
+   *  format as completedKeys (`"<palletIdx>|<itemIdx>|<code>"`). */
+  copiedKeys?: CompletedKeys;
+}
+
+export interface PalletReleaseBody {
+  completed: boolean;
+}
+
+export interface HeartbeatResponse {
+  updated: number;
 }
 
 export interface AuftragCreatePayload {
@@ -155,6 +212,10 @@ export interface WorkflowProgressPatch {
   currentItemIdx?: number;
   completedKeys?: CompletedKeys;
   palletTimings?: PalletTimings;
+  /** Per-user "green chip" map. Beta Focus mirrors copy progress to
+   *  the backend so takeover can hand it to the new owner. Classic
+   *  Focus keeps it in localStorage and never sends this field. */
+  copiedKeys?: CompletedKeys;
 }
 
 /** One flagged article in a Stornierung. `palletId` references
@@ -191,6 +252,33 @@ export interface CancellationInfo {
 export interface AuftragReorderItem {
   id: UUID;
   queuePosition: number;
+}
+
+/* ─── Work schedule ────────────────────────────────── */
+
+/** Wire format for /api/work-schedule. Times are 'HH:MM' or 'HH:MM:SS'
+ *  strings — the FastAPI `time` field round-trips as ISO. */
+export interface WorkSchedule {
+  workStart: string;
+  workEnd: string;
+  breakStart: string;
+  breakEnd: string;
+  /** ISO weekday list: Mon=1 .. Sun=7. */
+  workingDays: number[];
+  timezoneName: string;
+  updatedAt: ISODateString;
+  updatedByUserId: UUID | null;
+}
+
+/** PATCH body for /api/admin/work-schedule. Every field optional —
+ *  partial updates allowed. Times are 'HH:MM' or 'HH:MM:SS'. */
+export interface WorkSchedulePatchPayload {
+  workStart?: string;
+  workEnd?: string;
+  breakStart?: string;
+  breakEnd?: string;
+  workingDays?: number[];
+  timezoneName?: string;
 }
 
 /* ─── History ──────────────────────────────────────── */
@@ -293,6 +381,8 @@ export interface SkuDimensionRead {
   heightCm: number;
   weightKg: number;
   palletLoadMax: number | null;
+  /** Purchase price per VPE (Einheit) in EUR. Source: xlsx Preise+Infos. */
+  pricePerEinheitEur: number | null;
   source: string | null;
   updatedAt: ISODateString;
   updatedBy: string | null;
@@ -305,6 +395,7 @@ export interface SkuDimensionLookup {
   heightCm: number;
   weightKg: number;
   palletLoadMax: number | null;
+  pricePerEinheitEur: number | null;
   source: string | null;
 }
 
@@ -323,6 +414,7 @@ export interface SkuDimensionUpsert {
   heightCm: number;
   weightKg: number;
   palletLoadMax?: number | null;
+  pricePerEinheitEur?: number | null;
 }
 
 export interface SkuDimensionImportResult {
@@ -435,6 +527,8 @@ export interface LevelBucket {
   units: number;
   rollen: number;
   auftragCount: number;
+  /** Σ units × price_per_einheit_eur for items with a known price. */
+  costEur: number;
 }
 
 /* date is YYYY-MM-DD; values keys are level numbers as JSON strings */
@@ -455,6 +549,16 @@ export interface ReportsAggregates {
   rollenByDay: DailyLevelBucket[];
   heatmap: HeatmapCell[];
   days: number;
+  /** Σ len(items) across completed Aufträge in window. */
+  articlesTotal: number;
+  /** Σ items[].units across the same window. */
+  unitsTotal: number;
+  /** Σ units × price_per_einheit_eur for items with a known price. */
+  itemsValueEur: number;
+  /** Percentage of items that had a known price (0..100). */
+  itemsValueCoveragePct: number;
+  /** unitsTotal / effective_hours (lunch + non-work hours excluded). */
+  productivityUnitsPerHour: number;
 }
 
 export interface ReportsQuery {
