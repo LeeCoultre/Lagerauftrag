@@ -225,21 +225,24 @@ export function useAppState(): UseAppStateApi {
     retry: false,
   });
 
-  /* Beta Focus polling: while the user is on the multi-user Focus
-   * screen, refetch every 3 s so peer claims, heartbeats, and progress
-   * propagate without manual invalidate. Everywhere else (classic
-   * Focus, Pruefen, Upload, Historie, …) the query stays invalidate-
-   * driven — same behaviour the app had before multi-user. */
+  /* Beta Focus polling: 5 s refetch ONLY while the worker is actually
+   * on the multi-user Focus screen AND has a `me` identity loaded.
+   * Outside Focus (queue, Upload, Pruefen, Historie) we stay
+   * invalidate-driven — same behaviour the app had before multi-user.
+   * `refetchIntervalInBackground: false` (default) means TanStack
+   * pauses the interval when the tab is hidden, so we don't need a
+   * visibilityState check on top.
+   *
+   * 5 s (was 3 s) is a deliberate latency↔chattiness trade-off: with
+   * the full active row reaching ~80 KB on Railway, 3 s polling was
+   * the dominant cost on Focus screens; 5 s halves bandwidth and the
+   * worker still sees a peer takeover before the 5 min stale window. */
   const focusActive = useFocusActive();
   const auftraegeQ = useQuery({
     queryKey: ['auftraege'],
     queryFn: listAuftraege,
     enabled: !!effectivelySignedIn,
-    refetchInterval:
-      focusActive && typeof document !== 'undefined'
-        && document.visibilityState === 'visible'
-        ? 3000
-        : false,
+    refetchInterval: focusActive ? 5000 : false,
     refetchIntervalInBackground: false,
   });
 
@@ -477,10 +480,23 @@ export function useAppState(): UseAppStateApi {
       );
       return { prev };
     },
+    onSuccess: (data, { id }) => {
+      /* Patch the server's authoritative response into cache instead of
+         invalidating + refetching. Without this, every Artikel-✓ click
+         on Focus triggered a fresh GET /api/auftraege round-trip (~80 KB
+         payload with the full active parsed) — visibly laggy at Railway
+         latency. The 3 s focus polling still picks up other workers'
+         updates; we just don't pay the round-trip on our OWN writes. */
+      qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
+        (old || []).map((a) => (a.id === id ? data : a)),
+      );
+    },
     onError: (_e, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+      // Surface the bad cache state for a refetch — only on the rare
+      // error path; the success path no longer round-trips.
+      qc.invalidateQueries({ queryKey: ['auftraege'] });
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: ['auftraege'] }),
   });
 
   /* ── Actions (legacy useAppState() shape) ──────────────────────────── */

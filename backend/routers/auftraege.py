@@ -32,6 +32,7 @@ from backend.orm import (
 from backend.routers.pallet_claims import (
     _check_auto_complete,
     _load_claims,
+    _load_claims_batch,
     _session_member_index,
     _user_has_other_active_session,
 )
@@ -117,14 +118,12 @@ async def list_auftraege(
         db, {r.assigned_to_user_id for r in rows if r.assigned_to_user_id}
     )
 
-    # Batch-load all pallet_claims for the in-progress rows in one query
-    # so polling doesn't fan out to N round-trips.
+    # Batch-load every active claim across all in_progress rows in ONE
+    # round-trip (was previously N+1 — see _load_claims_batch docstring).
     active_ids = [
         r.id for r in rows if r.status == AuftragStatus.in_progress
     ]
-    claims_by_auftrag: dict[UUID, list] = {}
-    for aid in active_ids:
-        claims_by_auftrag[aid] = await _load_claims(db, aid)
+    claims_by_auftrag = await _load_claims_batch(db, active_ids)
 
     def _is_mine(r: Auftrag) -> bool:
         if r.status != AuftragStatus.in_progress:
@@ -140,10 +139,15 @@ async def list_auftraege(
         return False
 
     async def serialize(r: Auftrag) -> AuftragDetail:
+        # Skip the per-pallet effective-seconds compute for rows the
+        # caller doesn't own — Historie consumes that field, and Historie
+        # only sees rows assigned to me anyway. For peek + queue + error
+        # rows it's pure overhead (iterates parsed.pallets[]).
+        mine = _is_mine(r)
         d = AuftragDetail.from_orm_row(
             r,
             assigned_to_user_name=name_map.get(r.assigned_to_user_id),
-            schedule=schedule,
+            schedule=schedule if mine else None,
             pallet_claims=claims_by_auftrag.get(r.id, []),
         )
         # raw_text is the full docx body (10-30 KB / row) and never
@@ -155,7 +159,7 @@ async def list_auftraege(
         # parsed + validation so the not-yet-joined caller can't read
         # the docx contents but still sees enough to render a "Beitreten"
         # row (pallet_count from summary, palletClaims for free slots).
-        if r.status == AuftragStatus.in_progress and not _is_mine(r):
+        if r.status == AuftragStatus.in_progress and not mine:
             d.parsed = None
             d.validation = None
         return d

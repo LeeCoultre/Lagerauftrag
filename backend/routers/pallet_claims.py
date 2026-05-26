@@ -77,14 +77,32 @@ def _audit(
     ))
 
 
+def _claim_to_dto(claim: PalletClaim, user_name: str, now: datetime) -> PalletClaimDTO:
+    hb = claim.heartbeat_at
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=timezone.utc)
+    is_stale = (
+        claim.state == PalletClaimState.active
+        and (now - hb) > STALE_AFTER
+    )
+    return PalletClaimDTO(
+        pallet_idx=claim.pallet_idx,
+        user_id=claim.user_id,
+        user_name=user_name,
+        state=claim.state,
+        claimed_at=claim.claimed_at,
+        heartbeat_at=claim.heartbeat_at,
+        released_at=claim.released_at,
+        is_stale=is_stale,
+    )
+
+
 async def _load_claims(
     db: AsyncSession, auftrag_id: UUID
 ) -> list[PalletClaimDTO]:
-    """Fetch all non-released claims for the Auftrag, joined with user name.
-
-    `released` rows are dropped — they're history (one row per claim
-    lifecycle) and the UI only cares about who currently owns / has
-    completed each pallet."""
+    """Single-Auftrag claims fetch — used by per-row endpoints like /claim
+    and /release. For list_auftraege, prefer _load_claims_batch which
+    fetches every active Auftrag's claims in one round-trip."""
     q = (
         select(PalletClaim, User.name)
         .join(User, User.id == PalletClaim.user_id)
@@ -97,25 +115,37 @@ async def _load_claims(
     )
     rows = (await db.execute(q)).all()
     now = datetime.now(timezone.utc)
-    out: list[PalletClaimDTO] = []
-    for claim, name in rows:
-        hb = claim.heartbeat_at
-        if hb.tzinfo is None:
-            hb = hb.replace(tzinfo=timezone.utc)
-        is_stale = (
-            claim.state == PalletClaimState.active
-            and (now - hb) > STALE_AFTER
+    return [_claim_to_dto(claim, name, now) for claim, name in rows]
+
+
+async def _load_claims_batch(
+    db: AsyncSession, auftrag_ids: list[UUID],
+) -> dict[UUID, list[PalletClaimDTO]]:
+    """Fetch claims for multiple Auftraege in ONE SQL round-trip.
+
+    Replaces a previous N+1 in list_auftraege: with 5 in_progress rows
+    and Railway latency around 60 ms per call, the per-row loop cost
+    polling pays every 3 seconds at the top of every Focus screen
+    refresh. One IN-clause SELECT collapses it to a single trip."""
+    if not auftrag_ids:
+        return {}
+    q = (
+        select(PalletClaim, User.name)
+        .join(User, User.id == PalletClaim.user_id)
+        .where(
+            PalletClaim.auftrag_id.in_(auftrag_ids),
+            PalletClaim.state != PalletClaimState.released,
+            PalletClaim.state != PalletClaimState.taken_over,
         )
-        out.append(PalletClaimDTO(
-            pallet_idx=claim.pallet_idx,
-            user_id=claim.user_id,
-            user_name=name,
-            state=claim.state,
-            claimed_at=claim.claimed_at,
-            heartbeat_at=claim.heartbeat_at,
-            released_at=claim.released_at,
-            is_stale=is_stale,
-        ))
+        .order_by(PalletClaim.pallet_idx.asc(), PalletClaim.claimed_at.asc())
+    )
+    rows = (await db.execute(q)).all()
+    now = datetime.now(timezone.utc)
+    out: dict[UUID, list[PalletClaimDTO]] = {aid: [] for aid in auftrag_ids}
+    for claim, name in rows:
+        out.setdefault(claim.auftrag_id, []).append(
+            _claim_to_dto(claim, name, now),
+        )
     return out
 
 
