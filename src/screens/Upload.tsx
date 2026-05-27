@@ -30,6 +30,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LegacyAuftrag } from '@/types/state';
+import type { FnskuValidationReport } from '@/utils/fnskuValidator';
 import { useAppState } from '@/state.jsx';
 import { useApiHealth } from '@/hooks/useApiHealth.js';
 import { useRecentUploads } from '@/hooks/useRecentUploads.js';
@@ -164,11 +165,16 @@ export default function UploadScreen({ onRoute }) {
     });
     setBusy(false);
 
-    /* Auto-start countdown when exactly one ready entry was uploaded
-       AND nothing else is waiting. */
+    /* Instant start when exactly one ready entry was uploaded AND
+       nothing else is waiting. The old behaviour wrapped this in a
+       3-second visual countdown ("Sofort starten / In Warteschlange"
+       buttons + progress bar), which had become a perceived 2-step
+       upload: worker waits, then countdown, then Pruefen. Workers
+       asked for it gone — start straight into Pruefen the moment
+       the upload resolves. */
     const successes = built.filter((b) => b.status === 'ready');
     if (successes.length === 1 && !current && queue.length === 0) {
-      startCountdown(successes[0].id);
+      startEntry(successes[0].id);
     }
 
     if (files.length > 0 && successes.length === 0) {
@@ -750,14 +756,22 @@ function BatchTimelineRow({ row }) {
   const isDone    = row.stage === 'done';
   const isError   = row.stage === 'error';
 
+  const fnskuReport: FnskuValidationReport | null =
+    (row.validation && typeof row.validation === 'object' && (row.validation as { fnsku?: FnskuValidationReport }).fnsku) || null;
+  const [showFnskuDetail, setShowFnskuDetail] = useState(false);
+
   return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      padding: '8px 0',
+      borderTop: `1px solid ${T.accent.border}`,
+      animation: 'mp-up-fade 200ms ease-out',
+    }}>
     <div style={{
       display: 'flex',
       alignItems: 'center',
       gap: 10,
-      padding: '8px 0',
-      borderTop: `1px solid ${T.accent.border}`,
-      animation: 'mp-up-fade 200ms ease-out',
     }}>
       <span style={{ width: 16, display: 'inline-flex', justifyContent: 'center' }}>
         {isPending && <span style={{ width: 5, height: 5, borderRadius: '50%', background: T.text.faint }} />}
@@ -810,6 +824,7 @@ function BatchTimelineRow({ row }) {
             </>
           )}
           <ValidationPill validation={row.validation} />
+          <FnskuScanPill report={fnskuReport} expanded={showFnskuDetail} onToggle={() => setShowFnskuDetail((s) => !s)} />
         </span>
       )}
       {isError && (
@@ -824,6 +839,10 @@ function BatchTimelineRow({ row }) {
         }} title={row.error || ''}>
           {row.error || 'Fehler'}
         </span>
+      )}
+      </div>
+      {isDone && fnskuReport && showFnskuDetail && (
+        <FnskuScanDetail report={fnskuReport} />
       )}
     </div>
   );
@@ -840,6 +859,139 @@ function ValidationPill({ validation }) {
     return <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: T.status.danger.text, fontFamily: T.font.mono }}>{errs} FEHLER</span>;
   }
   return <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: T.status.warn.text, fontFamily: T.font.mono }}>{warns} WARN</span>;
+}
+
+/* Independent FNSKU-scan cross-check pill. Result comes from
+   validateFnskuAgainstParser() run in parseDocxFile() and is stored
+   under validation.fnsku. Green pill = scanner and columnar parser
+   agree; warn pill = at least one delta — click to expand. */
+function FnskuScanPill({ report, expanded, onToggle }: {
+  report: FnskuValidationReport | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (!report) return null;
+  if (report.status === 'ok') {
+    return (
+      <span style={{
+        fontSize: 10.5, fontWeight: 700, color: T.status.success.text,
+        fontFamily: T.font.mono,
+      }}
+      title={`FNSKU-Scan stimmt mit Parser überein (${report.summary.scanCount})`}
+      >FNSKU ✓</span>
+    );
+  }
+  const total = report.missingFromParser.length
+    + report.extraInParser.length
+    + report.countMismatches.length
+    + report.positionMismatches.length
+    + report.palletCountMismatches.length
+    + report.fieldConsistencyMismatches.length
+    + report.useItemMismatches.length;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      style={{
+        fontSize: 10.5, fontWeight: 700, color: T.status.warn.text,
+        fontFamily: T.font.mono,
+        background: 'transparent',
+        border: `1px solid ${T.status.warn.border}`,
+        borderRadius: 4,
+        padding: '2px 6px',
+        cursor: 'pointer',
+      }}
+      title="FNSKU-Vergleich Parser vs. Scanner — klicken für Details"
+    >
+      {total} FNSKU-DIFF {expanded ? '▾' : '▸'}
+    </button>
+  );
+}
+
+function FnskuScanDetail({ report }: { report: FnskuValidationReport }) {
+  const rowStyle: React.CSSProperties = {
+    fontFamily: T.font.mono,
+    fontSize: 11,
+    color: T.text.secondary,
+    paddingLeft: 26,
+    marginTop: 4,
+  };
+  const labelStyle: React.CSSProperties = {
+    color: T.status.warn.text, fontWeight: 700, marginRight: 6,
+  };
+  return (
+    <div style={{
+      marginTop: 6,
+      padding: '8px 10px 8px 26px',
+      background: T.bg.surface3,
+      borderRadius: 4,
+      borderLeft: `2px solid ${T.status.warn.main}`,
+      animation: 'mp-up-fade 200ms ease-out',
+    }}>
+      <div style={rowStyle}>
+        <span style={labelStyle}>Scan</span>{report.summary.scanCount}
+        <span style={{ margin: '0 6px', color: T.border.strong }}>·</span>
+        <span style={labelStyle}>Parser</span>{report.summary.parserCount}
+        {report.summary.headerCandidates.length > 0 && (
+          <>
+            <span style={{ margin: '0 6px', color: T.border.strong }}>·</span>
+            <span style={{ color: T.text.faint }}>
+              Header-Kandidaten ignoriert: {report.summary.headerCandidates.join(', ')}
+            </span>
+          </>
+        )}
+      </div>
+      {report.missingFromParser.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Im Text, nicht im Parser</span>
+          {report.missingFromParser.join(', ')}
+        </div>
+      )}
+      {report.extraInParser.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Im Parser, nicht im Text</span>
+          {report.extraInParser.join(', ')}
+        </div>
+      )}
+      {report.countMismatches.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Anzahl-Mismatch</span>
+          {report.countMismatches.map((m) => `${m.fnsku} (Text ${m.scan} / Parser ${m.parser})`).join(', ')}
+        </div>
+      )}
+      {report.positionMismatches.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Reihenfolge</span>
+          {report.positionMismatches.map((m) => `${m.fnsku} (Text #${m.scanIndex + 1} ↔ Parser #${m.parserIndex + 1})`).join(', ')}
+        </div>
+      )}
+      {report.palletCountMismatches.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Auf Palette</span>
+          {report.palletCountMismatches.map((m) =>
+            `${m.palletId}: ${m.fnsku} (Text ${m.scan} / Parser ${m.parser})`,
+          ).join(' · ')}
+        </div>
+      )}
+      {report.fieldConsistencyMismatches.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Feld-Konsistenz</span>
+          {report.fieldConsistencyMismatches.map((m) =>
+            `${m.fnsku}.${m.field}: [${m.values.join(' ≠ ')}]`,
+          ).join(' · ')}
+        </div>
+      )}
+      {report.useItemMismatches.length > 0 && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>useItem</span>
+          {report.useItemMismatches.map((m) => {
+            const expected = m.expectedField === 'fnsku' ? m.fnsku : (m.itemEan ?? '∅');
+            return `${m.fnsku}: useItem→${m.useItemExtractedCode} ≠ ${m.expectedField}=${expected}`;
+          }).join(' · ')}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ════════════════════════════════════════════════════════════════════════
