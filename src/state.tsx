@@ -276,19 +276,25 @@ export function useAppState(): UseAppStateApi {
   const meId = meQ.data?.id;
   const currentSrc = useMemo(
     () => {
-      if (!meId) {
-        // `me` not yet loaded — backend now returns ALL in_progress
-        // (peek-payload), so we MUST NOT pick the first one as ours;
-        // doing so would render another worker's pallet as "my current".
-        // Wait for Clerk to populate `me`; UI shows the queue meanwhile.
-        return null;
+      if (meId) {
+        // Happy path: `me` is loaded → identity-based filter.
+        return all.find((a) =>
+          a.status === 'in_progress'
+          && (
+            a.assignedToUserId === meId
+            || (a.sessionUsers ?? []).some((u) => u.userId === meId)
+          ),
+        ) ?? null;
       }
-      return all.find((a) =>
-        a.status === 'in_progress'
-        && (
-          a.assignedToUserId === meId
-          || (a.sessionUsers ?? []).some((u) => u.userId === meId)
-        ),
+      // `me` is still loading (first-paint or hard refresh). Backend
+      // already discriminated for us: peek rows for not-mine in_progress
+      // come back with parsed=null, my own row keeps the full parsed.
+      // Use that as a transient identity proxy so Workspace can route
+      // straight to Pruefen instead of sitting on UploadScreen for the
+      // ~300 ms it takes Clerk to populate the /me query — the visible
+      // "auto-start countdown ends but Pruefen lags 2 s" bug.
+      return all.find(
+        (a) => a.status === 'in_progress' && a.parsed != null,
       ) ?? null;
     },
     [all, meId],
@@ -334,8 +340,38 @@ export function useAppState(): UseAppStateApi {
       });
     },
   });
-  const removeMut  = useMutation({ mutationFn: deleteAuftrag, onSuccess: invalidateAll });
-  const reorderMut = useMutation({ mutationFn: apiReorder,    onSuccess: invalidateAll });
+  /* Optimistic delete — Entfernen from queue. Was previously invalidate-
+     and-refetch, which spent the full GET /api/auftraege round-trip
+     before the row disappeared from the UI (~700 ms on Railway). The
+     row IS visibly gone before the API replies; rollback on error
+     puts it back. */
+  const removeMut = useMutation<unknown, Error, UUID, { prev?: AuftragDetail[] }>({
+    mutationFn: deleteAuftrag,
+    onMutate: async (id) => {
+      await qc.cancelQueries({ queryKey: ['auftraege'] });
+      const prev = qc.getQueryData<AuftragDetail[]>(['auftraege']);
+      qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
+        (old || []).filter((a) => a.id !== id),
+      );
+      return { prev };
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+      invalidateAll();
+    },
+    onSuccess: () => {
+      // History never changes from a delete (we only allow deleting
+      // queued/error rows), so no history invalidate needed.
+    },
+  });
+  /* Reorder: rest of the UI already mutates the cache locally in
+     reorderQueueAction / reorderQueueTo before calling the API, so
+     the success path doesn't need a refetch. Only the failure path
+     pulls the server's view back. */
+  const reorderMut = useMutation({
+    mutationFn: apiReorder,
+    onError: invalidateAll,
+  });
 
   /* ── Optimistic cancel + start ───────────────────────────────────────
      Before this, every click on Verlassen / Start blocked the UI until
@@ -570,16 +606,13 @@ export function useAppState(): UseAppStateApi {
       );
       return;
     }
-    /* Defence against "current is still loading" gap: until `me` is
-       populated, `currentSrc` is null even if the user does have an
-       active Auftrag on the server. Without this check, click→/start
-       would bypass the frontend guard and the backend would respond
-       409 "another in progress" — confusing for the worker. Better
-       to wait a beat. */
-    if (!meId) {
-      alert('Profil wird noch geladen. Bitte einen Moment warten.');
-      return;
-    }
+    /* If `me` hasn't populated yet, currentSrc already falls back to
+       "any in_progress row that has parsed" (see above), so `current`
+       above caught the real case. Past that we let /start run — if
+       the worker really is double-booked the backend will surface a
+       409 and `startMut.onError` shows a friendly toast. We used to
+       alert here, but that fired during the Upload auto-start
+       countdown and felt like a regression. */
     /* Server-side cross-check: maybe a row exists where I'm primary or
        a participant that simply hasn't reached the `current` slot yet
        (e.g. multi-user-aware row in the cache that didn't pass the
