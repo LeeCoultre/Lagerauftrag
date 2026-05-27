@@ -28,7 +28,6 @@ import {
   startAuftrag, updateProgress, completeAuftrag, cancelAuftrag, abortAuftrag,
   getHistory, deleteHistoryEntry, getMe,
   lookupSkuDimensions,
-  joinSession, claimPallet,
   ApiError,
 } from './marathonApi';
 import type {
@@ -148,11 +147,6 @@ export function toLegacy(a: AuftragDetail | AuftragSummary | null | undefined): 
 
     assignedToUserId:   a.assignedToUserId,
     assignedToUserName: a.assignedToUserName,
-
-    // Multi-user fields — only present on Detail rows; let consumers
-    // (Warteschlange's JoinableBanner) compute free-pallet counts.
-    palletClaims: detail.palletClaims,
-    sessionUsers: detail.sessionUsers,
   };
 }
 
@@ -252,11 +246,10 @@ export function useAppState(): UseAppStateApi {
     enabled: !!effectivelySignedIn,
   });
 
-  /* Backend returns AuftragDetail for the list endpoint — slim for
-     non-active rows (parsed/raw_text stripped), full for the caller's
-     own active row. Typed as Detail so the multi-user-aware fields
-     (palletClaims, sessionUsers) are readable; legacy Summary callers
-     still work via structural typing. */
+  /* Backend returns AuftragDetail for the list endpoint — raw_text is
+     stripped to slim the payload, but `parsed` is present for the
+     caller's active row so Pruefen / Focus have the data on mount
+     without a separate detail fetch. */
   const all: AuftragDetail[] = auftraegeQ.data ?? [];
 
   const queue = useMemo(
@@ -267,32 +260,19 @@ export function useAppState(): UseAppStateApi {
     [all],
   );
 
-  /* Backend's GET /api/auftraege returns ALL in_progress Aufträge now
-     (peek-only payload for not-mine rows) — multi-user discovery needs
-     it so non-members can see active sessions in Warteschlange and
-     join. Pick MY active row by primary or session membership; fall
-     back to "any in_progress" while `me` is loading so the UI still
-     transitions on first start (Clerk session populates async). */
+  /* Pick MY active in_progress Auftrag — the single source of truth
+     for the workflow screen routing. Falls back to "any in_progress
+     with parsed" while `me` is loading: backend only serves full
+     parsed for the assigned user, so a non-null parsed is a reliable
+     identity proxy during the ~300 ms Clerk session populate window. */
   const meId = meQ.data?.id;
   const currentSrc = useMemo(
     () => {
       if (meId) {
-        // Happy path: `me` is loaded → identity-based filter.
-        return all.find((a) =>
-          a.status === 'in_progress'
-          && (
-            a.assignedToUserId === meId
-            || (a.sessionUsers ?? []).some((u) => u.userId === meId)
-          ),
+        return all.find(
+          (a) => a.status === 'in_progress' && a.assignedToUserId === meId,
         ) ?? null;
       }
-      // `me` is still loading (first-paint or hard refresh). Backend
-      // already discriminated for us: peek rows for not-mine in_progress
-      // come back with parsed=null, my own row keeps the full parsed.
-      // Use that as a transient identity proxy so Workspace can route
-      // straight to Pruefen instead of sitting on UploadScreen for the
-      // ~300 ms it takes Clerk to populate the /me query — the visible
-      // "auto-start countdown ends but Pruefen lags 2 s" bug.
       return all.find(
         (a) => a.status === 'in_progress' && a.parsed != null,
       ) ?? null;
@@ -421,12 +401,21 @@ export function useAppState(): UseAppStateApi {
   const startMut = useMutation<AuftragDetail, Error, UUID, { prev?: AuftragDetail[] }>({
     mutationFn: startAuftrag,
     onMutate: async (id) => {
-      await qc.cancelQueries({ queryKey: ['auftraege'] });
+      /* Optimistic write FIRST (synchronous), THEN await cancelQueries.
+         The await would otherwise delay the cache flip by a microtask
+         and cause a one-frame Upload drop-zone flicker before Pruefen
+         mounts.
+
+         Crucially: assigned_to_user_id must be set to ME — otherwise
+         currentSrc.find(a => a.status==='in_progress' && a.assignedToUserId===meId)
+         won't match the optimistic row (still has assignedToUserId=null
+         from the queued state), and Workspace stays on UploadScreen
+         until the backend response arrives (1-2 s on Railway). That
+         IS the "delay between countdown end and Pruefen showing" bug. */
       const prev = qc.getQueryData<AuftragDetail[]>(['auftraege']);
-      // Optimistic only flips status + workflow fields. parsed stays
-      // null until the server returns Detail (with the full payload
-      // for this user as active worker) and we patch it in.
       const nowIso = new Date().toISOString();
+      const meIdNow   = meQ.data?.id;
+      const meNameNow = meQ.data?.name;
       qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
         (old || []).map((a) => a.id === id ? {
           ...a,
@@ -435,15 +424,27 @@ export function useAppState(): UseAppStateApi {
           step: 'pruefen' as WorkflowStep,
           currentPalletIdx: 0,
           currentItemIdx: 0,
+          assignedToUserId:   meIdNow   ?? a.assignedToUserId,
+          assignedToUserName: meNameNow ?? a.assignedToUserName,
         } : a),
       );
+      await qc.cancelQueries({ queryKey: ['auftraege'] });
       return { prev };
     },
     onSuccess: (data, id) => {
       // Patch the freshly-started row with full parsed so Pruefen/
       // Focus mount with real data, no extra round-trip needed.
+      // Defensive: preserve cache's parsed if response is missing it.
       qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
-        (old || []).map((a) => a.id === id ? data : a),
+        (old || []).map((a) => {
+          if (a.id !== id) return a;
+          return {
+            ...data,
+            parsed: data.parsed ?? a.parsed,
+            rawText: data.rawText ?? a.rawText,
+            validation: data.validation ?? a.validation,
+          };
+        }),
       );
     },
     onError: (err, _id, ctx) => {
@@ -459,7 +460,7 @@ export function useAppState(): UseAppStateApi {
       } else if (status === 409 && lower.includes('another auftrag in progress')) {
         /* Server-side "one active per user" guard fired because our
            frontend guard missed (e.g. cache hadn't caught up yet).
-           Surface a friendly message instead of the raw EN string. */
+           Friendly message instead of the raw EN string. */
         alert(
           'Du hast bereits einen aktiven Auftrag. Schließe ihn ab oder ' +
           'breche ihn ab, bevor du einen neuen startest.'
@@ -518,13 +519,20 @@ export function useAppState(): UseAppStateApi {
     },
     onSuccess: (data, { id }) => {
       /* Patch the server's authoritative response into cache instead of
-         invalidating + refetching. Without this, every Artikel-✓ click
-         on Focus triggered a fresh GET /api/auftraege round-trip (~80 KB
-         payload with the full active parsed) — visibly laggy at Railway
-         latency. The 3 s focus polling still picks up other workers'
-         updates; we just don't pay the round-trip on our OWN writes. */
+         invalidating + refetching. Defensive merge: if the response is
+         missing `parsed` (backend transient / stripped serialization),
+         keep what cache had — never overwrite a populated parsed with
+         null, that's the "Pruefen suddenly empty" bug. */
       qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
-        (old || []).map((a) => (a.id === id ? data : a)),
+        (old || []).map((a) => {
+          if (a.id !== id) return a;
+          return {
+            ...data,
+            parsed: data.parsed ?? a.parsed,
+            rawText: data.rawText ?? a.rawText,
+            validation: data.validation ?? a.validation,
+          };
+        }),
       );
     },
     onError: (_e, _vars, ctx) => {
@@ -606,52 +614,20 @@ export function useAppState(): UseAppStateApi {
       );
       return;
     }
-    /* If `me` hasn't populated yet, currentSrc already falls back to
-       "any in_progress row that has parsed" (see above), so `current`
-       above caught the real case. Past that we let /start run — if
-       the worker really is double-booked the backend will surface a
-       409 and `startMut.onError` shows a friendly toast. We used to
-       alert here, but that fired during the Upload auto-start
-       countdown and felt like a regression. */
-    /* Server-side cross-check: maybe a row exists where I'm primary or
-       a participant that simply hasn't reached the `current` slot yet
-       (e.g. multi-user-aware row in the cache that didn't pass the
-       in_progress filter due to race). Block here with a friendly
-       hint instead of letting the backend 409 leak through. */
-    const detailList = qc.getQueryData<AuftragDetail[]>(['auftraege']) ?? [];
-    const myActive = detailList.find((a) =>
-      a.status === 'in_progress'
-      && (
-        a.assignedToUserId === meId
-        || (a.sessionUsers ?? []).some((u) => u.userId === meId)
-      ),
-    );
-    if (myActive) {
-      alert(
-        'Du hast bereits einen aktiven Auftrag (' +
-        (myActive.fileName || myActive.fbaCode || myActive.id) +
-        '). Schließe ihn ab oder breche ihn ab, bevor du einen neuen startest.'
-      );
-      return;
-    }
-    /* Strict order: only the queue head (first non-error row) may start.
-       Error rows are skipped so a single broken parse doesn't lock the
-       rest of the shift. Smart-sort / DnD remain the way to reorder. */
+    /* Any non-error queued row may start. Strict head-of-queue used to
+       block this with an alert; in practice it just blocked workers
+       whose UI cache lagged behind the server (stale rows on top) and
+       added zero invariant — the backend doesn't enforce queue order.
+       Drag-to-reorder remains the way to prioritise. */
     const headId = queue.find((q) => q.status !== 'error')?.id;
-    if (entryId && headId && entryId !== headId) {
-      alert(
-        'Bitte zuerst den obersten Auftrag starten oder die Reihenfolge ändern.'
-      );
-      return;
-    }
     const target = entryId || headId || queue[0]?.id;
     if (!target) return;
 
     /* Guard against stale-cache double-start: the row may already be
        in_progress on the server (a polling refetch will surface that
        state momentarily). Without this, /start returns 409 "Already
-       taken" and the worker is left confused. Reuse the detailList
-       grabbed above for the membership check. */
+       taken" and the worker is left confused. */
+    const detailList = qc.getQueryData<AuftragDetail[]>(['auftraege']) ?? [];
     const targetDetail = detailList.find((a) => a.id === target);
     if (targetDetail && targetDetail.status === 'in_progress') {
       // Either I'm the primary returning to my row (back-button reload
@@ -812,81 +788,6 @@ export function useAppState(): UseAppStateApi {
     history.forEach((h) => deleteHistMut.mutate(h.id));
   }, [history, deleteHistMut]);
 
-  /* ── Multi-user awareness: shared Warteschlange ──────────────────────
-     All accounts see the same queue. When a worker on another account
-     has an Auftrag in_progress, every other user sees it surfaced as an
-     "Aktive Sitzung" banner with an Übernehmen button. The banner is
-     visible REGARDLESS of free pallet count — when every pallet is
-     held the Übernehmen action just goes disabled with "Voll". This
-     keeps the floor view consistent with the user's mental model
-     ("orders are shared, everyone sees the same Warteschlange") and
-     stops a fully-claimed Auftrag from vanishing from observers'
-     screens.
-
-     `meId` not loaded → still empty (we wait for identity before
-     deciding what's mine vs other; the gap is ~200 ms and only on
-     first paint). */
-  const joinable = useMemo<LegacyAuftrag[]>(
-    () => {
-      if (!meId) return [];
-      return all
-        .filter((a) => {
-          if (a.status !== 'in_progress') return false;
-          if (a.assignedToUserId === meId) return false;
-          if ((a.sessionUsers ?? []).some((u) => u.userId === meId)) return false;
-          return (a.palletCount ?? 0) > 0;
-        })
-        .map(toLegacy)
-        .filter((x): x is LegacyAuftrag => x != null);
-    },
-    [all, meId],
-  );
-
-  /* Join a not-mine in_progress Auftrag + immediately claim the first
-     free pallet. Returns true if both succeeded — the caller then
-     navigates to workspace to enter Focus. */
-  const joinAndClaimFirst = useCallback(async (auftragId: UUID): Promise<boolean> => {
-    const row = all.find((a) => a.id === auftragId);
-    if (!row || row.status !== 'in_progress') return false;
-    const palletCount = row.palletCount ?? 0;
-    if (palletCount === 0) return false;
-    const occupied = new Set(
-      (row.palletClaims ?? [])
-        .filter((c) => c.state === 'active' || c.state === 'completed')
-        .map((c) => c.palletIdx),
-    );
-    let nextFree: number | null = null;
-    for (let i = 0; i < palletCount; i++) {
-      if (!occupied.has(i)) { nextFree = i; break; }
-    }
-    if (nextFree == null) return false;
-    try {
-      await joinSession(auftragId);
-    } catch (e) {
-      /* 409 — already in another active session, or session full.
-         Surface via alert; UI stays on Warteschlange. */
-      const msg = e instanceof Error ? e.message : 'Beitreten fehlgeschlagen.';
-      alert(msg);
-      return false;
-    }
-    try {
-      await claimPallet(auftragId, nextFree);
-    } catch (e) {
-      /* 409 race: a parallel worker grabbed the slot. Invalidate the
-         cache so the polling cycle surfaces the next free pallet on the
-         caller's next click. Don't keep retrying inline — would block
-         the click handler arbitrarily long. */
-      qc.invalidateQueries({ queryKey: ['auftraege'] });
-      const status = e instanceof ApiError ? e.status : 0;
-      alert(status === 409
-        ? 'Diese Palette wurde gerade übernommen. Bitte erneut tippen.'
-        : (e instanceof Error ? e.message : 'Übernehmen fehlgeschlagen.'));
-      return false;
-    }
-    qc.invalidateQueries({ queryKey: ['auftraege'] });
-    return true;
-  }, [all, qc]);
-
   return useMemo<UseAppStateApi>(() => ({
     queue, current, history,
     addFiles, removeFromQueue, reorderQueue: reorderQueueAction, reorderQueueTo, clearQueue,
@@ -895,7 +796,6 @@ export function useAppState(): UseAppStateApi {
     moveEskuToPallet, resetEskuOverrides,
     completeCurrentItem, completeAndAdvance, cancelCurrent, abortCurrent,
     removeHistoryEntry, clearHistory,
-    joinable, joinAndClaimFirst,
   }), [
     queue, current, history,
     addFiles, removeFromQueue, reorderQueueAction, reorderQueueTo, clearQueue,
@@ -904,6 +804,5 @@ export function useAppState(): UseAppStateApi {
     moveEskuToPallet, resetEskuOverrides,
     completeCurrentItem, completeAndAdvance, cancelCurrent, abortCurrent,
     removeHistoryEntry, clearHistory,
-    joinable, joinAndClaimFirst,
   ]);
 }

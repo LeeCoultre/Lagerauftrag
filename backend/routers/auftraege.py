@@ -32,7 +32,6 @@ from backend.orm import (
 from backend.routers.pallet_claims import (
     _check_auto_complete,
     _load_claims,
-    _load_claims_batch,
     _session_member_index,
     _user_has_other_active_session,
 )
@@ -85,27 +84,19 @@ async def list_auftraege(
     db: AsyncSession = Depends(get_db),
     schedule = Depends(load_work_schedule),
 ):
-    """Queue + every in_progress Auftrag (caller's own with full payload,
-    others as peek-only for the "Beitreten" affordance in Warteschlange).
+    """Queue + the caller's own in_progress Auftrag.
 
-    The peek payload for not-mine rows carries only the fields the queue
-    needs (summary counts, pallet_claims so the frontend knows how many
-    pallets are free, session_users so it can hide the row if I'm
-    already a member). parsed / raw_text / validation are stripped to
-    keep the payload small (~30-80 KB savings per non-active row, which
-    matters with 5-10 queued + a few active Aufträge in flight).
-
-    Why every in_progress instead of just-mine: multi-user discovery.
-    A second worker arriving at Warteschlange needs to SEE the active
-    Auftrag to be able to click "Beitreten" → auto-claim a free pallet.
-    Backend guards (/progress, /claim) ensure peek can't write anything.
+    Single-user workflow: each worker handles one Auftrag at a time and
+    only ever sees rows that are queued, errored, or assigned to them.
     """
-    member_token = [{"user_id": str(me.id)}]
     q = (
         select(Auftrag)
         .where(
             (Auftrag.status == AuftragStatus.queued)
-            | (Auftrag.status == AuftragStatus.in_progress)
+            | (
+                (Auftrag.status == AuftragStatus.in_progress)
+                & (Auftrag.assigned_to_user_id == me.id)
+            )
             | (Auftrag.status == AuftragStatus.error)
         )
         .order_by(
@@ -118,50 +109,17 @@ async def list_auftraege(
         db, {r.assigned_to_user_id for r in rows if r.assigned_to_user_id}
     )
 
-    # Batch-load every active claim across all in_progress rows in ONE
-    # round-trip (was previously N+1 — see _load_claims_batch docstring).
-    active_ids = [
-        r.id for r in rows if r.status == AuftragStatus.in_progress
-    ]
-    claims_by_auftrag = await _load_claims_batch(db, active_ids)
-
-    def _is_mine(r: Auftrag) -> bool:
-        if r.status != AuftragStatus.in_progress:
-            return True   # queued / error rows aren't "owned" — always slim-fine
-        if r.assigned_to_user_id == me.id:
-            return True
-        for entry in (r.session_users or []):
-            try:
-                if str(entry.get("user_id")) == str(me.id):
-                    return True
-            except Exception:
-                continue
-        return False
-
     async def serialize(r: Auftrag) -> AuftragDetail:
-        # Skip the per-pallet effective-seconds compute for rows the
-        # caller doesn't own — Historie consumes that field, and Historie
-        # only sees rows assigned to me anyway. For peek + queue + error
-        # rows it's pure overhead (iterates parsed.pallets[]).
-        mine = _is_mine(r)
         d = AuftragDetail.from_orm_row(
             r,
             assigned_to_user_name=name_map.get(r.assigned_to_user_id),
-            schedule=schedule if mine else None,
-            pallet_claims=claims_by_auftrag.get(r.id, []),
+            schedule=schedule,
         )
         # raw_text is the full docx body (10-30 KB / row) and never
         # rendered in any list view. Strip it to slim the payload while
-        # keeping `parsed` available for caller's own active row —
+        # keeping `parsed` available for the caller's active row —
         # Pruefen needs it the moment the worker clicks Start.
         d.raw_text = None
-        # Peek-only for in_progress Aufträge that aren't mine: strip
-        # parsed + validation so the not-yet-joined caller can't read
-        # the docx contents but still sees enough to render a "Beitreten"
-        # row (pallet_count from summary, palletClaims for free slots).
-        if r.status == AuftragStatus.in_progress and not mine:
-            d.parsed = None
-            d.validation = None
         return d
 
     return [await serialize(r) for r in rows]

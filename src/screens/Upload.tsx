@@ -165,23 +165,22 @@ export default function UploadScreen({ onRoute }) {
     });
     setBusy(false);
 
-    /* Instant start when exactly one ready entry was uploaded AND
-       nothing else is waiting. The old behaviour wrapped this in a
-       3-second visual countdown ("Sofort starten / In Warteschlange"
-       buttons + progress bar), which had become a perceived 2-step
-       upload: worker waits, then countdown, then Pruefen. Workers
-       asked for it gone — start straight into Pruefen the moment
-       the upload resolves. */
+    /* Auto-start with 3-second countdown when exactly one ready entry
+       was uploaded AND I don't already have an active Auftrag. The
+       countdown gives the worker a window to override: Sofort starten
+       (skip) or Abbrechen (drop into queue). Whether the queue already
+       has other items doesn't matter — the worker JUST dropped this
+       file, so the intent is "start this one next". */
     const successes = built.filter((b) => b.status === 'ready');
-    if (successes.length === 1 && !current && queue.length === 0) {
-      startEntry(successes[0].id);
+    if (successes.length === 1 && !current) {
+      startCountdown(successes[0].id);
     }
 
     if (files.length > 0 && successes.length === 0) {
       setParseError(built[0]?.error || 'Keine Datei konnte verarbeitet werden.');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addFiles, addRecent, current, queue.length, isOffline]);
+  }, [addFiles, addRecent, current, isOffline]);
 
   const acceptFiles = useCallback((fl: FileList | File[] | null) => {
     const arr = Array.from(fl || []).filter((f: File) => /\.docx$/i.test(f.name));
@@ -201,30 +200,60 @@ export default function UploadScreen({ onRoute }) {
   };
   const cancelDuplicates = () => setDuplicateConfirm(null);
 
-  /* ── countdown logic ──────────────────────────────────────────── */
-  const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /* ── countdown logic ───────────────────────────────────────────────
+     Two independent timers, one responsibility each:
+       • fireTimer (setTimeout) — single shot at exactly 3000 ms,
+         triggers the actual /start mutation. Precise — no drift.
+       • displayTimer (setInterval) — 200 ms cadence, updates the
+         visible second counter using wall-clock math
+         (Date.now() - startedAt). Drift-free.
+     Both auto-fire and the "Sofort starten" button go through the
+     same fireNow() function so behaviour is identical. */
+  const fireTimer    = useRef<ReturnType<typeof setTimeout>  | null>(null);
+  const displayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Hold the latest startEntry in a ref so the setTimeout closure
+  // always sees the current callback, not the one captured at scheduling.
+  const startEntryRef = useRef(startEntry);
+  useEffect(() => { startEntryRef.current = startEntry; }, [startEntry]);
+
   const cancelCountdown = useCallback(() => {
-    if (countdownTimer.current) {
-      clearInterval(countdownTimer.current);
-      countdownTimer.current = null;
-    }
+    if (fireTimer.current)    { clearTimeout(fireTimer.current);     fireTimer.current    = null; }
+    if (displayTimer.current) { clearInterval(displayTimer.current); displayTimer.current = null; }
     setCountdown(null);
   }, []);
-  const startCountdown = (auftragId) => {
-    let remaining = COUNTDOWN_SEC;
-    setCountdown({ auftragId, remaining });
-    countdownTimer.current = setInterval(() => {
-      remaining -= 1;
-      if (remaining <= 0) {
-        if (countdownTimer.current != null) clearInterval(countdownTimer.current);
-        countdownTimer.current = null;
-        setCountdown(null);
-        startEntry(auftragId);
-      } else {
-        setCountdown({ auftragId, remaining });
-      }
-    }, 1000);
-  };
+
+  const fireNow = useCallback((auftragId: string) => {
+    cancelCountdown();
+    startEntryRef.current(auftragId);
+  }, [cancelCountdown]);
+
+  const startCountdown = useCallback((auftragId: string) => {
+    cancelCountdown();
+    /* Pre-fetch the Pruefen chunk NOW so it arrives by the time the
+       countdown ends. Without this, the dynamic import only kicks off
+       inside startEntry (when the countdown fires), so the worker
+       sees a 100-500 ms Suspense fallback "Lädt…" between t=3 s and
+       the actual Pruefen mount on first-of-session uploads. The
+       fire-and-forget import is idempotent — already-cached chunks
+       resolve instantly. */
+    void import('./Pruefen.jsx');
+    const startedAt = Date.now();
+    const totalMs   = COUNTDOWN_SEC * 1000;
+    setCountdown({ auftragId, remaining: COUNTDOWN_SEC });
+
+    displayTimer.current = setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const remaining = Math.max(1, Math.ceil((totalMs - elapsed) / 1000));
+      setCountdown((cur) =>
+        cur && cur.auftragId === auftragId && cur.remaining !== remaining
+          ? { ...cur, remaining }
+          : cur,
+      );
+    }, 200);
+
+    fireTimer.current = setTimeout(() => fireNow(auftragId), totalMs);
+  }, [cancelCountdown, fireNow]);
+
   useEffect(() => () => cancelCountdown(), [cancelCountdown]);
 
   /* ── paste support ────────────────────────────────────────────── */
@@ -299,10 +328,7 @@ export default function UploadScreen({ onRoute }) {
         onCancelCountdown={cancelCountdown}
         onStartNow={() => {
           const idToStart = countdown?.auftragId || lastSuccess?.id;
-          if (idToStart) {
-            cancelCountdown();
-            startEntry(idToStart);
-          }
+          if (idToStart) fireNow(idToStart);
         }}
         onAttachInstead={() => {
           cancelCountdown();
@@ -438,10 +464,7 @@ export default function UploadScreen({ onRoute }) {
               onCancelCountdown={cancelCountdown}
               onStartNow={() => {
                 const idToStart = countdown?.auftragId || lastSuccess?.id;
-                if (idToStart) {
-                  cancelCountdown();
-                  startEntry(idToStart);
-                }
+                if (idToStart) fireNow(idToStart);
               }}
               onAttachInstead={() => {
                 cancelCountdown();
@@ -2164,12 +2187,11 @@ function BetaUploadView({
 }) {
   /* State-machine resolver — single in-place body per render. Ordering
      mirrors HeroDropZone's classic precedence. */
-  const state: 'countdown' | 'duplicate' | 'error' | 'parsing' | 'success-single' | 'success-multi' | 'drag-over' | 'idle' = (() => {
+  const state: 'countdown' | 'duplicate' | 'error' | 'parsing' | 'success-multi' | 'drag-over' | 'idle' = (() => {
     if (countdown)         return 'countdown';
     if (duplicateConfirm)  return 'duplicate';
     if (parseError)        return 'error';
     if (busy)              return 'parsing';
-    if (singleSuccess)     return 'success-single';
     if (showBatchSummary)  return 'success-multi';
     if (over || globalOver) return 'drag-over';
     return 'idle';
@@ -2322,15 +2344,6 @@ function BetaUploadBody({
   }
   if (state === 'parsing') {
     return <BetaParsingBody batch={batch} />;
-  }
-  if (state === 'success-single') {
-    return (
-      <BetaSuccessSingleBody
-        row={singleSuccess}
-        onStart={onStartNow}
-        onAttach={onAttachInstead}
-      />
-    );
   }
   if (state === 'success-multi') {
     return (

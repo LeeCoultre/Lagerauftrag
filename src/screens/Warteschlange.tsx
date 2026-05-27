@@ -67,7 +67,6 @@ function ClassicWarteschlange({ onRoute }) {
     queue, current,
     addFiles, startEntry,
     removeFromQueue, reorderQueue, reorderQueueTo, clearQueue,
-    joinable, joinAndClaimFirst,
   } = useAppState();
 
   const [over, setOver]               = useState(false);
@@ -328,17 +327,6 @@ function ClassicWarteschlange({ onRoute }) {
         {/* IN-BEARBEITUNG BANNER */}
         {current && (
           <CurrentBanner current={current} onRoute={onRoute} />
-        )}
-
-        {/* AKTIVE SITZUNGEN ANDERER WORKER — BEITRETEN */}
-        {!current && joinable.length > 0 && (
-          <JoinableBanner
-            joinable={joinable}
-            onJoin={async (id) => {
-              const ok = await joinAndClaimFirst(id);
-              if (ok && onRoute) onRoute('workspace');
-            }}
-          />
         )}
 
         {/* HERO KPI STRIP */}
@@ -697,80 +685,6 @@ function CurrentBanner({ current, onRoute }) {
           <path d="M3 6h6m0 0L6 3m3 3L6 9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </Button>
-    </div>
-  );
-}
-
-/* Aktive Sessions anderer Worker — kompaktes Banner, in jeder Zeile
-   ein "Übernehmen" auf die nächste freie Palette. Sichtbar nur, wenn
-   der aktuelle Worker keine eigene aktive Sitzung hat (sonst lenkt es
-   nur ab und der Worker kann ohnehin nicht parallel beitreten).      */
-function JoinableBanner({ joinable, onJoin }) {
-  return (
-    <div style={{ marginBottom: 32, display: 'grid', gap: 12 }}>
-      <div style={{
-        fontSize: 11, fontWeight: 600, fontFamily: T.font.mono,
-        color: T.text.subtle, textTransform: 'uppercase',
-        letterSpacing: '0.12em',
-      }}>
-        Aktive Sitzungen · Beitreten
-      </div>
-      {joinable.map((entry) => {
-        const fba = entry.fbaCode || entry.fileName;
-        const total = entry.palletCount ?? 0;
-        const occupied = new Set(
-          (entry.palletClaims ?? [])
-            .filter((c) => c.state === 'active' || c.state === 'completed')
-            .map((c) => c.palletIdx),
-        );
-        const freeCount = Math.max(0, total - occupied.size);
-        const primary = entry.assignedToUserName || 'Andere';
-        return (
-          <div key={entry.id} style={{
-            padding: '16px 20px',
-            background: T.bg.surface,
-            border: `1px dashed ${T.accent.border}`,
-            borderRadius: T.radius.lg,
-            display: 'grid',
-            gridTemplateColumns: '1fr auto',
-            alignItems: 'center',
-            gap: 24,
-          }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{
-                fontFamily: T.font.mono, fontSize: 11, fontWeight: 600,
-                color: T.accent.text, letterSpacing: '0.12em',
-                textTransform: 'uppercase', marginBottom: 4,
-              }}>
-                Läuft · {primary}
-              </div>
-              <div style={{
-                fontFamily: T.font.mono, fontSize: 16, fontWeight: 500,
-                color: T.text.primary,
-              }}>
-                {fba}
-              </div>
-              <div style={{
-                marginTop: 4, fontSize: 12, color: T.text.subtle,
-                fontVariantNumeric: 'tabular-nums',
-              }}>
-                {freeCount} freie Palette{freeCount === 1 ? '' : 'n'} · {total} insgesamt
-              </div>
-            </div>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={() => onJoin(entry.id)}
-              disabled={freeCount === 0}
-              title={freeCount === 0
-                ? 'Alle Paletten in Bearbeitung'
-                : 'Nächste freie Palette übernehmen'}
-            >
-              Übernehmen
-            </Button>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -2072,7 +1986,6 @@ function BetaWarteschlange({ onRoute }) {
     queue, current,
     addFiles, startEntry,
     removeFromQueue, reorderQueue, reorderQueueTo, clearQueue,
-    joinable, joinAndClaimFirst,
   } = useAppState();
 
   const [over, setOver]               = useState(false);
@@ -2385,17 +2298,6 @@ function BetaWarteschlange({ onRoute }) {
           );
         })()}
 
-        {/* AKTIVE SITZUNGEN ANDERER WORKER — BEITRETEN (Beta) */}
-        {!current && joinable.length > 0 && (
-          <BetaJoinableSection
-            joinable={joinable}
-            onJoin={async (id) => {
-              const ok = await joinAndClaimFirst(id);
-              if (ok && onRoute) onRoute('workspace');
-            }}
-          />
-        )}
-
         {/* SECONDARY rows */}
         {hasQueue && !noResults && secondaryEntries.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }}>
@@ -2528,82 +2430,6 @@ function BetaWarteschlange({ onRoute }) {
 /* ════════════════════════════════════════════════════════════════════════
    Beta atoms — cloned from BetaPruefen for visual consistency.
    ════════════════════════════════════════════════════════════════════════ */
-
-/* Beta-Variante der "Beitreten"-Section. Visuell konsistent mit dem
-   Hero-Stil (BetaPaperCard + BetaEyebrow), aber jede Zeile ist ein
-   klickbarer Übernehmen-Trigger, der joinAndClaimFirst auslöst. */
-function BetaJoinableSection({ joinable, onJoin }: { joinable: LegacyAuftrag[]; onJoin: (id: string) => void }) {
-  return (
-    <div style={{ marginTop: 6, marginBottom: 18 }}>
-      <div style={{ paddingLeft: 4, marginBottom: 8 }}>
-        <BetaEyebrow color={T.accent.text} dot>
-          Aktive Sitzungen · Beitreten · {joinable.length}
-        </BetaEyebrow>
-      </div>
-      <BetaPaperCard>
-        <BetaWhitePanel padding="6px 8px">
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-            {joinable.map((entry, k) => {
-              const fba = entry.fbaCode || entry.fileName;
-              const total = entry.palletCount ?? 0;
-              const occupied = new Set(
-                (entry.palletClaims ?? [])
-                  .filter((c) => c.state === 'active' || c.state === 'completed')
-                  .map((c) => c.palletIdx),
-              );
-              const freeCount = Math.max(0, total - occupied.size);
-              const primary = entry.assignedToUserName || 'Andere';
-              const isLast = k === joinable.length - 1;
-              return (
-                <li
-                  key={entry.id}
-                  onClick={() => freeCount > 0 && onJoin(entry.id)}
-                  style={{
-                    padding: '10px 12px',
-                    borderBottom: isLast ? undefined : `1px dashed ${T.border.subtle}`,
-                    cursor: freeCount > 0 ? 'pointer' : 'not-allowed',
-                    opacity: freeCount > 0 ? 1 : 0.55,
-                    display: 'grid',
-                    gridTemplateColumns: '1fr auto',
-                    alignItems: 'center',
-                    gap: 16,
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{
-                      fontFamily: T.font.mono, fontSize: 14, fontWeight: 500,
-                      color: T.text.primary,
-                    }}>
-                      {fba}
-                    </div>
-                    <div style={{
-                      marginTop: 2, fontSize: 11, color: T.text.subtle,
-                    }}>
-                      {primary} · {freeCount} freie Palette{freeCount === 1 ? '' : 'n'} · {total} gesamt
-                    </div>
-                  </div>
-                  <span style={{
-                    padding: '6px 14px',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    letterSpacing: '0.08em',
-                    textTransform: 'uppercase',
-                    color: freeCount > 0 ? T.accent.text : T.text.muted,
-                    background: freeCount > 0 ? T.accent.bg : T.bg.surface2,
-                    border: `1px solid ${freeCount > 0 ? T.accent.border : T.border.subtle}`,
-                    borderRadius: T.radius.full,
-                  }}>
-                    {freeCount > 0 ? 'Übernehmen →' : 'Voll'}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </BetaWhitePanel>
-      </BetaPaperCard>
-    </div>
-  );
-}
 
 function BetaWarteschlangeStyles() {
   return (
