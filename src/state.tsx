@@ -812,11 +812,20 @@ export function useAppState(): UseAppStateApi {
     history.forEach((h) => deleteHistMut.mutate(h.id));
   }, [history, deleteHistMut]);
 
-  /* ── Multi-user join discovery (beta) ────────────────────────────────
-     Aufträge in_progress that aren't mine — surfaced in Warteschlange
-     as "Beitreten" rows when there's a free pallet I can claim. The
-     server returns these with parsed=null (peek-only), so we read just
-     pallet_claims to compute free slots. */
+  /* ── Multi-user awareness: shared Warteschlange ──────────────────────
+     All accounts see the same queue. When a worker on another account
+     has an Auftrag in_progress, every other user sees it surfaced as an
+     "Aktive Sitzung" banner with an Übernehmen button. The banner is
+     visible REGARDLESS of free pallet count — when every pallet is
+     held the Übernehmen action just goes disabled with "Voll". This
+     keeps the floor view consistent with the user's mental model
+     ("orders are shared, everyone sees the same Warteschlange") and
+     stops a fully-claimed Auftrag from vanishing from observers'
+     screens.
+
+     `meId` not loaded → still empty (we wait for identity before
+     deciding what's mine vs other; the gap is ~200 ms and only on
+     first paint). */
   const joinable = useMemo<LegacyAuftrag[]>(
     () => {
       if (!meId) return [];
@@ -825,14 +834,7 @@ export function useAppState(): UseAppStateApi {
           if (a.status !== 'in_progress') return false;
           if (a.assignedToUserId === meId) return false;
           if ((a.sessionUsers ?? []).some((u) => u.userId === meId)) return false;
-          const palletCount = a.palletCount ?? 0;
-          if (palletCount === 0) return false;
-          const occupied = new Set(
-            (a.palletClaims ?? [])
-              .filter((c) => c.state === 'active' || c.state === 'completed')
-              .map((c) => c.palletIdx),
-          );
-          return occupied.size < palletCount;
+          return (a.palletCount ?? 0) > 0;
         })
         .map(toLegacy)
         .filter((x): x is LegacyAuftrag => x != null);

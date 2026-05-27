@@ -83,7 +83,18 @@ async def client():
 
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db():
-    """Wipe every Marathon table before each test (RESTART IDENTITY + CASCADE)."""
+    """Wipe every Marathon table before each test (RESTART IDENTITY + CASCADE).
+
+    ⚠️  This TRUNCATE includes sku_dimensions + lynne_products. On the
+    shared prod Railway DB those tables hold the warehouse's hard-won
+    L×B×H/weight rows and the LYNNE catalog — once wiped, they have to
+    be restored from the source xlsx (Admin → Dimensions upload and
+    `python -m backend.import_lynne --source …`). DO NOT copy this
+    TRUNCATE pattern into ad-hoc smoke scripts running against the
+    Railway URL. Either run them against a local Postgres (set
+    DATABASE_URL=postgres://localhost/marathon_test) or scope the
+    DELETE to test-user rows.
+    """
     async with engine.begin() as conn:
         await conn.execute(text(
             "TRUNCATE pallet_claims, audit_log, auftraege, users, "
