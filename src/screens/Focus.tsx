@@ -78,7 +78,7 @@ export default function FocusScreen() {
     setCurrentPalletIdx,
     setCurrentItemIdx, markCodeCopied,
     moveEskuToPallet,
-    completeCurrentItem, cancelCurrent, abortCurrent, goToStep,
+    completeCurrentItem, leaveCurrent, abortCurrent, goToStep,
   } = useAppState();
   const [stornoOpen, setStornoOpen] = useState(false);
   const { beta: betaDesign } = useBetaDesign();
@@ -322,6 +322,165 @@ export default function FocusScreen() {
     `${displayCurrentIdx}|${displayCurrentItemIdx}`,
   );
 
+  /* ── Rail/Island split (beta only) ──────────────────────────────────
+     Fully Fertig'd pallets disappear from the FlowLeftRail and migrate
+     into the BetaIslandBar's left-side «Done» tray. They stay clickable
+     there for review, while the rail stays focused on the work that's
+     still ahead. The CURRENT pallet is always kept in the rail even if
+     marked done (worker may have navigated back to a done pallet). */
+
+  /* O(1) lookup: palletId → Set<itemIdx> of Fertig'd items. Reused by
+     donePalletRawIdxs and (potentially) future logic. */
+  const completedItemIdxByPalletId = useMemo(() => {
+    const m = new Map<string, Set<number>>();
+    for (const key of Object.keys(completedKeysObj)) {
+      const firstSep = key.indexOf('|');
+      if (firstSep < 0) continue;
+      const palletId = key.slice(0, firstSep);
+      const rest = key.slice(firstSep + 1);
+      const secondSep = rest.indexOf('|');
+      if (secondSep < 0) continue;
+      const idx = parseInt(rest.slice(0, secondSep), 10);
+      if (!Number.isFinite(idx)) continue;
+      if (!m.has(palletId)) m.set(palletId, new Set());
+      m.get(palletId)!.add(idx);
+    }
+    return m;
+  }, [completedKeysObj]);
+
+  /* Raw indices of pallets whose every item has been Fertig'd. */
+  const donePalletRawIdxs = useMemo(() => {
+    const out = new Set<number>();
+    rawPallets.forEach((p, rawIdx) => {
+      const total = p.items?.length || 0;
+      if (total === 0) return;
+      const completed = completedItemIdxByPalletId.get(p.id);
+      if (!completed) return;
+      if (completed.size >= total) out.add(rawIdx);
+    });
+    return out;
+  }, [rawPallets, completedItemIdxByPalletId]);
+
+  /* Pallets visible in the FlowLeftRail — drop done, keep current. */
+  const railPallets = useMemo(() => {
+    return displayPallets.filter((p) => {
+      const rawIdx = rawPallets.findIndex((rp) => rp.id === p.id);
+      if (rawIdx < 0) return true;
+      if (rawIdx === palletIdx) return true;
+      return !donePalletRawIdxs.has(rawIdx);
+    });
+  }, [displayPallets, rawPallets, palletIdx, donePalletRawIdxs]);
+
+  /* displayIdx → railIdx — for remapping copied/completed sets and the
+     current-pallet pointer into rail coordinates. */
+  const railIdxByDisplayIdx = useMemo(() => {
+    const m = new Map<number, number>();
+    displayPallets.forEach((p, displayIdx) => {
+      const railIdx = railPallets.findIndex((rp) => rp.id === p.id);
+      if (railIdx >= 0) m.set(displayIdx, railIdx);
+    });
+    return m;
+  }, [displayPallets, railPallets]);
+
+  const railCurrentIdx = railIdxByDisplayIdx.get(displayCurrentIdx) ?? 0;
+
+  const railCopiedKeys = useMemo(() => {
+    const out = new Set<string>();
+    displayCopiedKeys.forEach((k) => {
+      const sep = k.indexOf('|');
+      if (sep < 0) return;
+      const di = parseInt(k.slice(0, sep), 10);
+      const railIdx = railIdxByDisplayIdx.get(di);
+      if (railIdx == null) return;
+      out.add(`${railIdx}|${k.slice(sep + 1)}`);
+    });
+    return out;
+  }, [displayCopiedKeys, railIdxByDisplayIdx]);
+
+  const railCompletedKeys = useMemo(() => {
+    const out = new Set<string>();
+    displayCompletedKeys.forEach((k) => {
+      const sep = k.indexOf('|');
+      if (sep < 0) return;
+      const di = parseInt(k.slice(0, sep), 10);
+      const railIdx = railIdxByDisplayIdx.get(di);
+      if (railIdx == null) return;
+      out.add(`${railIdx}|${k.slice(sep + 1)}`);
+    });
+    return out;
+  }, [displayCompletedKeys, railIdxByDisplayIdx]);
+
+  /* Done-pallet metadata projected for the BetaIslandBar tray. Ordered
+     by displayPallets sequence so the chips read «what's behind you»
+     in the same left-to-right order the worker lived through. The
+     current pallet is excluded — it stays in the rail until the worker
+     moves on.
+
+     Each entry carries a projected `items` list so the click-popover
+     can render the article list directly without a second lookup —
+     and crucially without ever changing currentPalletIdx (peek-only
+     review; clicking a done chip never «returns» it to the rail). */
+  const donePalletsForIsland = useMemo(() => {
+    type IslandChipItem = {
+      level: number;
+      title: string;
+      code: string;
+      units: number;
+      isEsku: boolean;
+    };
+    type IslandChip = {
+      rawIdx: number;
+      id: string;
+      shortId: string;
+      itemCount: number;
+      primaryLevel: number;
+      hasMultipleLevels: boolean;
+      hasEsku: boolean;
+      hasFlag: boolean;
+      items: IslandChipItem[];
+    };
+    const out: IslandChip[] = [];
+    displayPallets.forEach((p) => {
+      const rawIdx = rawPallets.findIndex((rp) => rp.id === p.id);
+      if (rawIdx < 0 || rawIdx === palletIdx) return;
+      if (!donePalletRawIdxs.has(rawIdx)) return;
+      const rawItems = p.items || [];
+      const ps = palletStates?.[p.id];
+      const levels = new Set<number>();
+      let hasEsku = !!ps?.anyEsku;
+      let hasFlag = !!(ps?.overloadFlags && ps.overloadFlags.size > 0);
+      const projectedItems: IslandChipItem[] = [];
+      for (const it of rawItems) {
+        const view = focusItemView(it) as any;
+        const lvl = view?.level || getDisplayLevel(view) || 1;
+        levels.add(lvl);
+        const itemIsEsku = !!(view?.isEinzelneSku || view?.isEsku);
+        if (itemIsEsku) hasEsku = true;
+        if ((view?.placementMeta?.flags || []).length > 0) hasFlag = true;
+        projectedItems.push({
+          level: lvl,
+          title: simplifyItemTitle(view?.name || view?.title || '—'),
+          code: view?.code || view?.useItemCode || '',
+          units: Math.max(0, Number(view?.units) || 0),
+          isEsku: itemIsEsku,
+        });
+      }
+      const primaryLevel = [...levels].sort((a, b) => a - b)[0] || 1;
+      out.push({
+        rawIdx,
+        id: p.id,
+        shortId: shortPalletId(p),
+        itemCount: rawItems.length,
+        primaryLevel,
+        hasMultipleLevels: levels.size > 1,
+        hasEsku,
+        hasFlag,
+        items: projectedItems,
+      });
+    });
+    return out;
+  }, [displayPallets, rawPallets, palletIdx, donePalletRawIdxs, palletStates]);
+
   /* Stable callback for the chip strip — keeps NumberedChip's React.memo
      effective. Re-binds only when the active pallet id (translation key)
      or the override map changes. */
@@ -519,23 +678,22 @@ export default function FocusScreen() {
     }
     // Cross-pallet step: next pallet in display order, start at its
     // first display-item (also remapped through its own override).
+    // Free navigation — no allPalletCopied gate here; the gate stays
+    // ONLY inside handleFertig() where data integrity matters. The
+    // celebratory interlude also fires from handleFertig (real pallet
+    // completion), never from a mere navigation hop.
     const nextPalletRaw = nextDisplayPalletRawIdx(palletIdx);
     if (nextPalletRaw != null) {
-      if (!allPalletCopied) {
-        alert(blockMessage());
-        return;
-      }
       const nextPalletId = rawPallets[nextPalletRaw]?.id;
       const firstRawIdx = nextPalletId
         ? articleDisplayToOrig(nextPalletId, 0)
         : 0;
-      setInterlude(buildInterludePayload(palletIdx));
       setCurrentPalletIdx(nextPalletRaw);
       if (firstRawIdx !== 0) setTimeout(() => setCurrentItemIdx(firstRawIdx), 0);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawPallet, itemIdx, palletIdx, rawPallets, allPalletCopied,
-      setCurrentItemIdx, setCurrentPalletIdx, buildInterludePayload,
+  }, [rawPallet, itemIdx, palletIdx, rawPallets,
+      setCurrentItemIdx, setCurrentPalletIdx,
       nextDisplayPalletRawIdx, articleOrderOverride]);
 
   const goPrevItem = useCallback(() => {
@@ -807,8 +965,8 @@ export default function FocusScreen() {
       if (betaDesign) {
         /* Beta axis — vertical = items inside current pallet (bounded,
            mirrors FlowStream's wheel handler; no cross-pallet step),
-           horizontal = pallets (display-order, with the same
-           allPalletCopied gate as the bottom island).
+           horizontal = pallets (display-order, FREELY traversable —
+           no copy-gate, no interlude on plain navigation).
            ↑/↓ skip Fertig'd items so they stay in the «Erledigt»-Strip
            and the hero never briefly surfaces a completed article. */
         if (e.key === 'ArrowDown') {
@@ -832,11 +990,7 @@ export default function FocusScreen() {
         if (e.key === 'ArrowRight') {
           e.preventDefault();
           const nextRaw = nextDisplayPalletRawIdx(palletIdx);
-          if (nextRaw != null) {
-            if (!allPalletCopied) { alert(blockMessage()); return; }
-            setInterlude(buildInterludePayload(palletIdx));
-            setCurrentPalletIdx(nextRaw);
-          }
+          if (nextRaw != null) setCurrentPalletIdx(nextRaw);
           return;
         }
         if (e.key === 'ArrowLeft') {
@@ -848,14 +1002,13 @@ export default function FocusScreen() {
       } else {
         /* Classic axis — horizontal = items (chip-strip layout),
            vertical = pallets. ←/→ goNextItem/goPrevItem also cross
-           pallet boundaries at item ends, preserving prior behavior. */
+           pallet boundaries at item ends. Free navigation across
+           pallets (no copy-gate). */
         if (e.key === 'ArrowRight') { e.preventDefault(); goNextItem(); return; }
         if (e.key === 'ArrowLeft')  { e.preventDefault(); goPrevItem(); return; }
         if (e.key === 'ArrowDown')  {
           e.preventDefault();
           if (palletIdx + 1 < rawPallets.length) {
-            if (!allPalletCopied) { alert(blockMessage()); return; }
-            setInterlude(buildInterludePayload(palletIdx));
             setCurrentPalletIdx(palletIdx + 1);
           }
           return;
@@ -898,13 +1051,14 @@ export default function FocusScreen() {
 
   const onExit = async () => {
     const ok = await confirm({
-      message: 'Auftrag verlassen?',
-      detail: 'Fortschritt bleibt gespeichert — du kannst jederzeit zurückkehren.',
-      confirmLabel: 'Verlassen',
-      cancelLabel: 'Zurück',
+      message: 'Auftrag endgültig löschen?',
+      detail: 'Der gesamte Fortschritt und der Auftrag selbst werden ' +
+              'unwiderruflich entfernt — kein Zurück.',
+      confirmLabel: 'Löschen',
+      cancelLabel: 'Abbrechen',
       danger: true,
     });
-    if (ok) cancelCurrent();
+    if (ok) leaveCurrent();
   };
 
   /* ── Empty state ── */
@@ -988,8 +1142,8 @@ export default function FocusScreen() {
                 </Button>
                 <button
                   onClick={onExit}
-                  title="Focus verlassen — Fortschritt bleibt gespeichert"
-                  aria-label="Focus verlassen"
+                  title="Auftrag verlassen — wird endgültig gelöscht"
+                  aria-label="Auftrag verlassen"
                   style={{
                     width: 32,
                     height: 32,
@@ -1071,34 +1225,50 @@ export default function FocusScreen() {
                   setCurrentItemIdx(rawItemIdx);
                 }}
                 palletFlowProps={{
-                  pallets: displayPallets,
+                  /* Rail-only subset: done pallets migrate to the
+                     BetaIslandBar tray. Indices below are RAIL coords —
+                     remapped from displayPallets via railIdxByDisplayIdx. */
+                  pallets: railPallets,
                   palletStates,
                   palletTimings: current?.palletTimings,
-                  currentIdx: displayCurrentIdx,
+                  currentIdx: railCurrentIdx,
                   itemIdx: displayCurrentItemIdx,
-                  copiedKeys: displayCopiedKeys,
-                  completedKeys: displayCompletedKeys,
+                  copiedKeys: railCopiedKeys,
+                  completedKeys: railCompletedKeys,
                   allPalletCopied,
-                  onPickPallet: (displayIdx) => {
-                    const target = displayPallets[displayIdx];
+                  onPickPallet: (railIdx) => {
+                    const target = railPallets[railIdx];
                     if (!target) return;
                     const i = rawPallets.findIndex((p) => p.id === target.id);
                     if (i < 0 || i === palletIdx) return;
-                    if (i > palletIdx && !allPalletCopied) { alert(blockMessage()); return; }
-                    if (i > palletIdx) setInterlude(buildInterludePayload(palletIdx));
+                    /* Free navigation — клик по любой палете в рейле
+                       прыгает на неё без gate-проверок. Interlude
+                       (ceremony) сохраняется только в handleFertig
+                       при реальном завершении палеты. */
                     setCurrentPalletIdx(i);
                   },
                   onPickItem: handlePickItem,
-                  onReorder: (fromIdx, toIdx) => {
-                    if (fromIdx === toIdx) return;
+                  onReorder: (fromRailIdx, toRailIdx) => {
+                    /* Drag-reorder inside the rail must respect the full
+                       displayPallets order — done pallets (hidden in the
+                       rail but still part of the auftrag sequence) stay
+                       put. We translate rail indices back to displayPallets
+                       indices via id lookup, then move within the full
+                       id array stored in palletOrderOverride. */
+                    if (fromRailIdx === toRailIdx) return;
+                    const fromId = railPallets[fromRailIdx]?.id;
+                    const toId = railPallets[toRailIdx]?.id;
+                    if (!fromId || !toId) return;
                     setPalletOrderOverride((prev) => {
-                      const ids = prev || rawPallets.map((p) => p.id);
-                      if (fromIdx < 0 || toIdx < 0
-                          || fromIdx >= ids.length || toIdx >= ids.length) return prev;
-                      const arr = [...ids];
-                      const [moved] = arr.splice(fromIdx, 1);
-                      arr.splice(toIdx, 0, moved);
-                      return arr;
+                      const ids = prev && prev.length === rawPallets.length
+                        ? [...prev]
+                        : displayPallets.map((p) => p.id);
+                      const fromFull = ids.indexOf(fromId);
+                      const toFull = ids.indexOf(toId);
+                      if (fromFull < 0 || toFull < 0) return prev;
+                      const [moved] = ids.splice(fromFull, 1);
+                      ids.splice(toFull, 0, moved);
+                      return ids;
                     });
                   },
                 }}
@@ -1219,8 +1389,8 @@ export default function FocusScreen() {
                     if (!target) return;
                     const i = rawPallets.findIndex((p) => p.id === target.id);
                     if (i < 0 || i === palletIdx) return;
-                    if (i > palletIdx && !allPalletCopied) { alert(blockMessage()); return; }
-                    if (i > palletIdx) setInterlude(buildInterludePayload(palletIdx));
+                    /* Free navigation (classic) — same semantics as the
+                       beta rail: jump anywhere, no gate, no interlude. */
                     setCurrentPalletIdx(i);
                   }}
                   onPickItem={handlePickItem}
@@ -1262,6 +1432,7 @@ export default function FocusScreen() {
           onOpenList={() => setPalletListOpen(true)}
           onStorno={() => setStornoOpen(true)}
           intensity={islandIntensity}
+          donePallets={donePalletsForIsland}
         />
       ) : (
         <FocusStickyBar
@@ -1274,7 +1445,7 @@ export default function FocusScreen() {
           missingCopies={missingCopies.length}
           canPrev={!(palletIdx === 0 && itemIdx === 0)}
           canNext={(itemIdx + 1 < rawPallet.items.length)
-                   || (palletIdx + 1 < rawPallets.length && allPalletCopied)}
+                   || (palletIdx + 1 < rawPallets.length)}
           onPrev={goPrevItem}
           onNext={goNextItem}
           onFertig={handleFertig}
@@ -2729,8 +2900,8 @@ function BetaTopPill({
       <button
         type="button"
         onClick={onExit}
-        title="Focus verlassen — Fortschritt bleibt gespeichert"
-        aria-label="Focus verlassen"
+        title="Auftrag verlassen — wird endgültig gelöscht"
+        aria-label="Auftrag verlassen"
         style={{
           width: 32,
           height: 32,
@@ -2798,6 +2969,27 @@ interface BetaIslandBarProps {
       isActive: boolean;
     }>;
   } | null;
+  /* Done-pallet tray (beta only) — fully Fertig'd pallets that have
+     migrated out of FlowLeftRail. Click on a chip expands the bar
+     inline (no portal, no popover) to show that pallet's article
+     list as a read-only review. Empty array hides the tray entirely. */
+  donePallets?: Array<{
+    rawIdx: number;
+    id: string;
+    shortId: string;
+    itemCount: number;
+    primaryLevel: number;
+    hasMultipleLevels: boolean;
+    hasEsku: boolean;
+    hasFlag: boolean;
+    items: Array<{
+      level: number;
+      title: string;
+      code: string;
+      units: number;
+      isEsku: boolean;
+    }>;
+  }>;
 }
 function BetaIslandBar({
   onFertig, canFertig,
@@ -2807,36 +2999,126 @@ function BetaIslandBar({
   onOpenList,
   onStorno,
   intensity = null,
+  donePallets = [],
 }: BetaIslandBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   /* Intensity chip → click toggles a floating detail panel that
      hovers just above the island, showing the larger curve plus a
      per-item breakdown (units · volume · weight · intensity). */
   const [intensityOpen, setIntensityOpen] = useState(false);
-  /* Tray height is measured (not max-height) so the bar can animate to
-     the exact content height. The tray content is absolutely positioned
-     so its intrinsic width never propagates to the bar — keeping the
-     bar's width LOCKED at its closed/nav-row natural width. */
-  const trayContentRef = useRef<HTMLDivElement>(null);
-  const [trayHeight, setTrayHeight] = useState(0);
+  /* Which done-pallet chip is expanded (id), if any. Lifted here so
+     the existing Apple-style mutex (one tray open at a time) extends
+     to done-pallet peeks too. Cleared on Zen + when intensity/menu
+     trays open. */
+  const [expandedDonePalletId, setExpandedDonePalletId] = useState<string | null>(null);
+  /* ── Adaptive bar sizing ────────────────────────────────────────────
+     The bar morphs in BOTH width and height under its currently-active
+     state (nav-row alone, or one of three trays open). Every measurable
+     surface gets a {w, h} ResizeObserver via the shared useTrayMeasure
+     helper below. The bar's `width` is then driven explicitly from the
+     max of (navRow, currently-open-tray) — see `targetWidth` later. */
+  const expandedDonePallet = useMemo(
+    () => donePallets.find((p) => p.id === expandedDonePalletId) || null,
+    [donePallets, expandedDonePalletId],
+  );
+
+  const navRowRef           = useRef<HTMLDivElement>(null);
+  const trayContentRef      = useRef<HTMLDivElement>(null);
+  const donePeekTrayContentRef = useRef<HTMLDivElement>(null);
+  const menuTrayContentRef  = useRef<HTMLDivElement>(null);
+
+  const [navRowSize,    setNavRowSize]    = useState({ w: 0, h: 0 });
+  const [intensitySize, setIntensitySize] = useState({ w: 0, h: 0 });
+  const [donePeekSize,  setDonePeekSize]  = useState({ w: 0, h: 0 });
+  const [menuSize,      setMenuSize]      = useState({ w: 0, h: 0 });
+
+  /* Shared measure-helper. `gateOpen=false` means: stop observing AND
+     zero the size — we don't want a stale ref'd-but-unmounted tray to
+     pin the bar wide. Used for done-peek which only renders while
+     expandedDonePallet is truthy. */
   useLayoutEffect(() => {
-    const el = trayContentRef.current;
+    const el = navRowRef.current;
     if (!el) return undefined;
-    const update = () => {
-      const h = el.scrollHeight;
-      if (h > 0) setTrayHeight(Math.round(h));
-    };
+    const update = () => setNavRowSize({
+      w: Math.round(el.offsetWidth),
+      h: Math.round(el.offsetHeight),
+    });
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
+  /* Tray contents are anchored with `position:absolute; left:0; right:0`
+     (legacy width-lock layout). offsetWidth on such an element reflects
+     the FORCED containing-block width — not the natural intrinsic size.
+     scrollWidth, however, returns the size needed to fit all content
+     without horizontal clipping → that's the natural width we need to
+     decide how wide the bar should grow. */
+  useLayoutEffect(() => {
+    const el = trayContentRef.current;
+    if (!el) return undefined;
+    const update = () => setIntensitySize({
+      w: Math.round(el.scrollWidth),
+      h: Math.round(el.scrollHeight),
+    });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = donePeekTrayContentRef.current;
+    if (!el || !expandedDonePallet) {
+      setDonePeekSize({ w: 0, h: 0 });
+      return undefined;
+    }
+    const update = () => setDonePeekSize({
+      w: Math.round(el.scrollWidth),
+      h: Math.round(el.scrollHeight),
+    });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [expandedDonePallet]);
+
+  useLayoutEffect(() => {
+    const el = menuTrayContentRef.current;
+    if (!el) return undefined;
+    const update = () => setMenuSize({
+      w: Math.round(el.scrollWidth),
+      h: Math.round(el.scrollHeight),
+    });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /* Back-compat aliases for code below that still reads the previous
+     single-axis names. Keeps the JSX diff small. */
+  const trayHeight         = intensitySize.h;
+  const donePeekTrayHeight = donePeekSize.h;
+
   /* Auto-collapse the menu whenever Zen turns on so the floating
      island reads as a single minimal nav bar. */
   useEffect(() => { if (zen && menuOpen) setMenuOpen(false); }, [zen, menuOpen]);
   /* Same for the intensity panel — Zen should mute every popover. */
   useEffect(() => { if (zen && intensityOpen) setIntensityOpen(false); }, [zen, intensityOpen]);
+  /* Same for the done-pallet peek — Zen mutes it too. */
+  useEffect(() => {
+    if (zen && expandedDonePalletId) setExpandedDonePalletId(null);
+  }, [zen, expandedDonePalletId]);
+  /* If the list of done pallets shrinks (e.g. ESKU reassignment changes
+     completion state), drop any stale expanded id that's no longer
+     present so the popover doesn't dangle on a vanished chip. */
+  useEffect(() => {
+    if (!expandedDonePalletId) return;
+    const stillPresent = donePallets.some((p) => p.id === expandedDonePalletId);
+    if (!stillPresent) setExpandedDonePalletId(null);
+  }, [donePallets, expandedDonePalletId]);
   /* Esc dismisses the panel without competing with workflow hotkeys
      (the page-level handler already gates on `intensityOpen=false`
      via document target checks). */
@@ -2848,16 +3130,71 @@ function BetaIslandBar({
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
   }, [intensityOpen]);
+  /* Same Esc-dismissal for the done-peek tray. */
+  useEffect(() => {
+    if (!expandedDonePalletId) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setExpandedDonePalletId(null); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [expandedDonePalletId]);
 
-  /* Apple-style mutual exclusion: opening one tray closes the other so
-     the island never balloons with two stacked drawers at once. */
-  const openIntensity = () => { setIntensityOpen((v) => !v); setMenuOpen(false); };
-  const openMenu      = () => { setMenuOpen((v) => !v);      setIntensityOpen(false); };
+  /* Apple-style mutual exclusion: opening one tray closes the others
+     so the island never balloons with multiple stacked drawers at
+     once. Three trays now share the mutex: intensity, done-peek, menu. */
+  const openIntensity = () => {
+    setIntensityOpen((v) => !v);
+    setMenuOpen(false);
+    setExpandedDonePalletId(null);
+  };
+  const openMenu = () => {
+    setMenuOpen((v) => !v);
+    setIntensityOpen(false);
+    setExpandedDonePalletId(null);
+  };
+  const onToggleDonePeek = (chipId: string) => {
+    setExpandedDonePalletId((prev) => (prev === chipId ? null : chipId));
+    setIntensityOpen(false);
+    setMenuOpen(false);
+  };
 
   /* The bar morphs between a tight pill (collapsed) and a soft rounded
-     rectangle (any tray open). Radius + min-width transition in unison
-     so it reads as a single Dynamic Island gesture. */
-  const anyOpen = !zen && (menuOpen || intensityOpen);
+     rectangle (any tray open). Width + height + radius transition in
+     unison so it reads as a single Dynamic Island gesture. */
+  const anyOpen = !zen && (menuOpen || intensityOpen || !!expandedDonePallet);
+
+  /* Target bar width — the widest of (nav-row, currently-open tray),
+     accounting for outer paddings + the bar's own 2px border.
+
+     Asymmetry in the inputs:
+       • navRowSize.w  = INNER inline-flex content (no padding included).
+                         Must add the outer wrapper's 32px horizontal
+                         padding (12px 16px → 16+16) before comparing.
+       • trayContent.w = inner-with-padding's scrollWidth — already
+                         includes its own 12px 16px padding.
+       • Bar has 2px border each side (box-sizing: border-box), so add
+         4px once at the end so the explicit width still leaves room
+         for the actual content.
+
+     MIN_BAR_W is a soft floor — the bar never feels skinnier than this
+     even if nav-row content is unusually small (e.g. zen-collapsed). */
+  const MIN_BAR_W = 220;
+  const NAV_OUTER_PAD_X = 32;
+  const BAR_BORDER_X = 4;
+  const openTrayWidth = intensityOpen ? intensitySize.w
+                      : expandedDonePallet ? donePeekSize.w
+                      : menuOpen ? menuSize.w
+                      : 0;
+  const navContentBox = navRowSize.w ? navRowSize.w + NAV_OUTER_PAD_X : 0;
+  const targetWidth = Math.max(
+    navContentBox > 0 ? MIN_BAR_W : 0,
+    navContentBox > 0 ? navContentBox + BAR_BORDER_X : 0,
+    openTrayWidth > 0 ? openTrayWidth + BAR_BORDER_X : 0,
+  );
+  const widthStyle = targetWidth > 0
+    ? { width: `${targetWidth}px` }
+    : { width: 'auto' as const };
 
   return (
     <div style={{
@@ -2866,17 +3203,21 @@ function BetaIslandBar({
       left: '50%',
       transform: 'translateX(-50%)',
       zIndex: 50,
-      width: 'auto',
+      ...widthStyle,
       maxWidth: 'calc(100% - 48px)',
       marginLeft: 'calc(var(--sidebar-width) / 2)',
       background: '#F8F8F8',
       border: '2px solid #FFFFFF',
       borderRadius: anyOpen ? 28 : 50,
       overflow: 'hidden',
+      boxSizing: 'border-box',
       transition: [
         'background 240ms ease',
         'border-color 240ms ease',
         'border-radius 320ms cubic-bezier(0.16, 1, 0.3, 1)',
+        /* Width transitions on the same spring as radius so the morph
+           reads as one motion (Dynamic Island feel). */
+        'width 320ms cubic-bezier(0.16, 1, 0.3, 1)',
         /* Slide with the sidebar collapse/expand animation (same curve
            + duration the Sidebar uses for its width transition). */
         'margin-left 240ms cubic-bezier(0.16, 1, 0.3, 1)',
@@ -2913,23 +3254,66 @@ function BetaIslandBar({
         </div>
       </div>
 
-      {/* ── Expanding menu (toggles + storno + exit) ──────────────────
-          Same morphing tray pattern as Intensity; mutually exclusive
-          via openMenu/openIntensity. */}
+      {/* ── Done-pallet peek tray — embedded list of the clicked done
+          pallet's articles. No popover, no portal: content renders
+          inline above the nav-row using the same morph pattern as
+          IntensityTray (height measured via ResizeObserver, content
+          absolutely positioned to keep the bar's width locked). */}
       <div style={{
-        maxHeight: menuOpen && !zen ? 64 : 0,
+        position: 'relative',
+        height:   expandedDonePallet && !zen ? donePeekTrayHeight : 0,
+        opacity:  expandedDonePallet && !zen ? 1 : 0,
+        overflow: 'hidden',
+        transition: [
+          'height 320ms cubic-bezier(0.16, 1, 0.3, 1)',
+          'opacity 220ms ease',
+        ].join(', '),
+        pointerEvents: expandedDonePallet && !zen ? 'auto' : 'none',
+      }}>
+        <div
+          ref={donePeekTrayContentRef}
+          style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0,
+          }}
+        >
+          {expandedDonePallet && (
+            <DonePeekTray
+              chip={expandedDonePallet}
+              onClose={() => setExpandedDonePalletId(null)}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* ── Expanding menu (toggles + storno + exit) ──────────────────
+          Same morphing tray pattern as Intensity / DonePeek: a relative
+          wrapper with MEASURED height + ABSOLUTELY-positioned content
+          so the menu row's natural width never leaks into the bar's
+          intrinsic content width directly (the bar's targetWidth picks
+          it up explicitly via menuSize.w). Mutually exclusive via
+          openMenu / openIntensity / onToggleDonePeek. */}
+      <div style={{
+        position: 'relative',
+        height: menuOpen && !zen ? menuSize.h : 0,
         opacity: menuOpen && !zen ? 1 : 0,
         overflow: 'hidden',
         borderBottom: menuOpen && !zen ? `1px solid ${T.border.subtle}` : '1px solid transparent',
-        transition: 'max-height 280ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease, border-color 240ms ease',
+        transition: 'height 280ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease, border-color 240ms ease',
         pointerEvents: menuOpen && !zen ? 'auto' : 'none',
       }}>
-        <div style={{
+        <div
+          ref={menuTrayContentRef}
+          style={{
+          position: 'absolute',
+          top: 0, left: 0, right: 0,
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '10px 16px',
+          justifyContent: 'center',
+          gap: 8,
+          padding: '12px 16px',
           whiteSpace: 'nowrap',
+          boxSizing: 'border-box',
         }}>
           <ViewListButton onClick={onOpenList} />
           <ShellToggle  on={schnellmodus}  onToggle={onToggleShell} />
@@ -2977,15 +3361,35 @@ function BetaIslandBar({
       </div>
 
       {/* ── Minimal nav row — always visible ───────────────────────────
-          A status pill (left), the Zurück · Fertig · Weiter cluster
-          (centre), and a menu-trigger button (right) that opens the
-          tray of secondary controls above. */}
+          Outer: flex + justify-center → fills the bar's (possibly
+          grown) width and keeps the nav-row content visually centered.
+          Inner: inline-flex → shrinks to its own content width so the
+          ResizeObserver-driven `navRowSize.w` reflects true content
+          width regardless of how wide the bar currently is. Without
+          this split, navRowRef.offsetWidth would equal bar width (a
+          circular dependency, since the bar's width depends on it). */}
       <div style={{
-        padding: '10px 14px 12px',
+        padding: '12px 16px',
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
+        justifyContent: 'center',
       }}>
+      <div
+        ref={navRowRef}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        {!zen && donePallets.length > 0 && (
+          <DonePalletsTray
+            pallets={donePallets}
+            expandedId={expandedDonePalletId}
+            onToggle={onToggleDonePeek}
+          />
+        )}
+
         {!zen && intensity && intensity.values.length >= 2 && (
           <button
             type="button"
@@ -3017,9 +3421,7 @@ function BetaIslandBar({
           </button>
         )}
 
-        {!zen && <span style={{ flex: 1 }} />}
-
-        <Button variant="primary" onClick={onFertig}
+        <Button variant="primary" size="sm" onClick={onFertig}
                 disabled={!canFertig}
                 title={canFertig
                   ? 'Artikel abschließen (Space oder Enter)'
@@ -3029,11 +3431,9 @@ function BetaIslandBar({
                   opacity: canFertig ? 1 : 0.45,
                   cursor: canFertig ? 'pointer' : 'not-allowed',
                 }}>
-          Artikel abschließen
+          Abschließen
           <Kbd onPrimary>Space</Kbd>
         </Button>
-
-        {!zen && <span style={{ flex: 1 }} />}
 
         {!zen && (
           <button
@@ -3065,6 +3465,377 @@ function BetaIslandBar({
             </svg>
           </button>
         )}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   DONE PALLETS TRAY — beta-only. Pallets that have been fully Fertig'd
+   leave the FlowLeftRail and arrive here, on the left edge of the
+   BetaIslandBar. The chip is a compact circular pill (≈36 px) keyed by
+   pallet id so React preserves identity across re-renders — the CSS
+   `.mr-done-chip-enter` animation fires once per chip when it mounts,
+   reading as a smooth migration from the rail above.
+
+   Click semantics: peek-only. A click toggles an INLINE tray INSIDE
+   the BetaIslandBar (no popover, no portal — see [[marathon-no-popups]])
+   showing the pallet's article list (level dot · title · code · units).
+   The current pallet is NEVER changed — clicking a done chip can no
+   longer accidentally drag the worker away from their active pallet.
+   Mutex with intensity/menu trays. Overflow rolls into a horizontal
+   scroll past 6 chips with a soft right-edge fade.
+   ──────────────────────────────────────────────────────────────────── */
+interface DonePalletsTrayProps {
+  pallets: NonNullable<BetaIslandBarProps['donePallets']>;
+  expandedId: string | null;
+  onToggle: (chipId: string) => void;
+}
+function DonePalletsTray({ pallets, expandedId, onToggle }: DonePalletsTrayProps) {
+  if (!pallets.length) return null;
+  /* Show newest-done first so the most recently finished pallet sits
+     closest to the intensity chip — the worker's most-likely review
+     target is one click away. */
+  const ordered = [...pallets].reverse();
+  return (
+    <div
+      role="group"
+      aria-label="Abgeschlossene Paletten"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        height: 44,
+        padding: '0 4px',
+        maxWidth: 360,
+        overflowX: 'auto',
+        overflowY: 'hidden',
+        scrollbarWidth: 'none',
+        flexShrink: 1,
+        /* Soft right-edge fade — hints at horizontal scroll when more
+           than ~6 chips would fit. Pure CSS mask, no JS. */
+        WebkitMaskImage:
+          'linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%)',
+        maskImage:
+          'linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%)',
+      }}
+    >
+      {ordered.map((p) => (
+        <DonePalletChip
+          key={p.id}
+          chip={p}
+          isExpanded={expandedId === p.id}
+          onToggle={() => onToggle(p.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+interface DonePalletChipProps {
+  chip: NonNullable<BetaIslandBarProps['donePallets']>[number];
+  isExpanded: boolean;
+  onToggle: () => void;
+}
+function DonePalletChip({ chip, isExpanded, onToggle }: DonePalletChipProps) {
+  const [hover, setHover] = useState(false);
+  const levelMeta = (LEVEL_META as any)[chip.primaryLevel] || (LEVEL_META as any)[1];
+  const active = isExpanded || hover;
+  const title = [
+    `Palette ${chip.shortId}`,
+    `${chip.itemCount} Artikel · abgeschlossen`,
+    chip.hasMultipleLevels ? 'gemischte Ebenen' : `${levelMeta.shortName}`,
+    chip.hasEsku ? 'ESKU dabei' : null,
+    chip.hasFlag ? 'mit Hinweis' : null,
+    isExpanded ? 'Klick zum Schließen' : 'Klick für Inhalt',
+  ].filter(Boolean).join(' · ');
+  return (
+    <button
+      type="button"
+      className="mr-done-chip-enter"
+      title={title}
+      aria-label={title}
+      aria-expanded={isExpanded}
+      onClick={onToggle}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: 'relative',
+        flexShrink: 0,
+        width: 36,
+        height: 36,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 0,
+        background: isExpanded
+          ? T.status.success.main
+          : active ? T.status.success.bg : '#FFFFFF',
+        border: `1.5px solid ${isExpanded
+          ? T.status.success.main
+          : active ? T.status.success.main : T.status.success.border}`,
+        borderRadius: '50%',
+        cursor: 'pointer',
+        fontFamily: T.font.mono,
+        fontSize: 11,
+        fontWeight: 700,
+        color: isExpanded ? '#FFFFFF' : T.status.success.text,
+        letterSpacing: '-0.005em',
+        lineHeight: 1,
+        transition: 'background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease, box-shadow 200ms ease',
+        transform: active ? 'translateY(-1px)' : 'translateY(0)',
+        boxShadow: isExpanded
+          ? `0 0 0 3px ${T.status.success.main}33, 0 6px 16px ${T.status.success.main}44`
+          : active ? `0 4px 12px ${T.status.success.main}33` : 'none',
+      }}
+    >
+      <span>{chip.shortId}</span>
+      {/* Flag indicator — overload / warnings present. Muted danger
+          dot bottom-right, only when applicable. */}
+      {chip.hasFlag && (
+        <span
+          aria-hidden
+          style={{
+            position: 'absolute',
+            bottom: 1,
+            right: 1,
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: T.status.danger.main,
+            border: '1px solid #FFFFFF',
+          }}
+        />
+      )}
+    </button>
+  );
+}
+
+/* ── DonePeekTray ────────────────────────────────────────────────────
+   Read-only review of a done pallet's articles rendered INSIDE the
+   BetaIslandBar (no popover, no portal). Mounted by BetaIslandBar
+   inside its tray slot — height is measured via ResizeObserver and
+   the bar morphs around it, mirroring the IntensityTray pattern.
+
+   Layout: header strip (shortId · count · level summary · ESKU/flag
+   chips · close ×) + scrollable item list (level dot · 01/02/… ·
+   simplified title · mono code · units · ESKU tag).
+   ──────────────────────────────────────────────────────────────────── */
+interface DonePeekTrayProps {
+  chip: NonNullable<BetaIslandBarProps['donePallets']>[number];
+  onClose: () => void;
+}
+function DonePeekTray({ chip, onClose }: DonePeekTrayProps) {
+  const levelMeta = (LEVEL_META as any)[chip.primaryLevel] || (LEVEL_META as any)[1];
+  return (
+    <div
+      role="region"
+      aria-label={`Inhalt der Palette ${chip.shortId}`}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        fontFamily: T.font.ui,
+      }}
+    >
+      {/* Header — pallet identity + completion summary + close × */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '12px 16px 10px',
+        borderBottom: `1px solid ${T.border.subtle}`,
+      }}>
+        <span style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minWidth: 30,
+          height: 28,
+          padding: '0 10px',
+          background: T.status.success.main,
+          color: '#FFFFFF',
+          borderRadius: 999,
+          fontFamily: T.font.mono,
+          fontSize: 11,
+          fontWeight: 800,
+          letterSpacing: '0.02em',
+        }}>
+          {chip.shortId}
+        </span>
+        <span style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+          <span style={{
+            fontFamily: T.font.mono,
+            fontSize: 10,
+            fontWeight: 700,
+            color: T.text.subtle,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+          }}>
+            Abgeschlossen
+          </span>
+          <span style={{
+            fontSize: 12,
+            color: T.text.subtle,
+            lineHeight: 1.3,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
+            {chip.itemCount} {chip.itemCount === 1 ? 'Artikel' : 'Artikel'}
+            {chip.hasMultipleLevels ? ' · gemischt' : ` · ${levelMeta.shortName}`}
+            {chip.hasEsku ? ' · ESKU' : ''}
+          </span>
+        </span>
+        {chip.hasFlag && (
+          <span title="Hinweis bei dieser Palette" style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '2px 8px',
+            background: T.status.danger.bg,
+            color: T.status.danger.main,
+            border: `1px solid ${T.status.danger.border}`,
+            borderRadius: 999,
+            fontFamily: T.font.mono,
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: '0.06em',
+          }}>
+            HINWEIS
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Schließen"
+          title="Schließen"
+          style={{
+            width: 28,
+            height: 28,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: `1px solid ${T.border.subtle}`,
+            borderRadius: '50%',
+            cursor: 'pointer',
+            color: T.text.subtle,
+            padding: 0,
+            flexShrink: 0,
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+            <path d="M2 2 L8 8 M8 2 L2 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Items list — scrollable; the tray's outer container caps height
+          via the BetaIslandBar's tray ResizeObserver pattern. */}
+      <div style={{
+        maxHeight: 260,
+        overflowY: 'auto',
+        padding: '6px 8px 12px',
+      }}>
+        {chip.items.length === 0 && (
+          <div style={{
+            padding: '20px 12px',
+            textAlign: 'center',
+            color: T.text.subtle,
+            fontSize: 12,
+          }}>
+            Keine Artikel.
+          </div>
+        )}
+        {chip.items.map((it, i) => {
+          const lm = (LEVEL_META as any)[it.level] || (LEVEL_META as any)[1];
+          return (
+            <div
+              key={`${i}|${it.code}`}
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 10,
+                padding: '8px 10px',
+                borderRadius: 12,
+                background: 'transparent',
+                transition: 'background 120ms ease',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = T.bg.surface2; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              {/* Level dot + number */}
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                flexShrink: 0,
+                paddingTop: 2,
+              }}>
+                <span aria-hidden style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: lm.color,
+                }} />
+                <span style={{
+                  fontFamily: T.font.mono,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: T.text.faint,
+                  width: 18,
+                  textAlign: 'right',
+                }}>
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+              </span>
+              {/* Title + code */}
+              <span style={{
+                flex: 1,
+                minWidth: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+              }}>
+                <span style={{
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: T.text.primary,
+                  lineHeight: 1.3,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}>
+                  {it.title}
+                </span>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontFamily: T.font.mono,
+                  fontSize: 10,
+                  color: T.text.subtle,
+                  letterSpacing: '0.02em',
+                }}>
+                  <span>{it.code || '—'}</span>
+                  {it.units > 0 && (
+                    <>
+                      <span style={{ color: T.text.faint }}>·</span>
+                      <span>{it.units} Stk</span>
+                    </>
+                  )}
+                  {it.isEsku && (
+                    <>
+                      <span style={{ color: T.text.faint }}>·</span>
+                      <span style={{ color: T.accent.text, fontWeight: 600 }}>ESKU</span>
+                    </>
+                  )}
+                </span>
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -3104,7 +3875,7 @@ function IntensityTray({ intensity }: IntensityTrayProps) {
       role="region"
       aria-label={`Pallet-Intensität ${palletShortId || ''}`}
       style={{
-        padding: '14px 18px 12px',
+        padding: '12px 16px',
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
@@ -3414,7 +4185,12 @@ function PalletFlow({
     const state = i === currentIdx
       ? 'current'
       : allCompleted ? 'done' : 'todo';
-    const blocked = i > currentIdx && !allPalletCopied;
+    /* Free navigation: every pallet in the rail is clickable. The old
+       "block forward jumps until all codes copied" gate has been lifted
+       so workers can freely review/analyse downstream pallets. The
+       data-integrity check stays in handleFertig() — you still can't
+       Fertig the last item of a pallet without copying the rest. */
+    const blocked = false;
     const ps = palletStates?.[p.id];
     const isEsku = !!ps?.anyEsku;
     const hasFlag = !!(
@@ -3676,9 +4452,25 @@ function IntensityCurve({
      a soft baseline shape rather than a jagged 5% waveform. */
   const effective = hasVariance ? values : values.map(() => 0.5);
 
+  /* Stroke + active-marker radii scale gently with the rendered height
+     so the larger curve in the detail panel reads as a proper hero
+     visual instead of a stretched pill thumbnail. */
+  const strokeW    = Math.max(2.5, height / 24);
+  const haloR      = Math.max(4.5, height / 16);
+  const dotR       = Math.max(2.6, height / 24);
+
+  /* Top/bottom insets reserve room for the round-stroke caps AND the
+     active marker's halo so neither gets visually clipped at the peak
+     (v=1) or trough (v=0). Halo dominates the top reserve because the
+     active marker is drawn ON the curve and extends `haloR` outward in
+     every direction; stroke half-width dominates the bottom. */
+  const topInset = Math.max(haloR + 0.5, strokeW / 2 + 1);
+  const botInset = Math.max(strokeW / 2 + 1, 1.5);
+  const yRange   = Math.max(1, height - topInset - botInset);
+
   const points: Array<[number, number]> = effective.map((v, i) => {
     const x = n === 1 ? W / 2 : (i / (n - 1)) * W;
-    const y = (1 - v) * (height - 2) + 1; /* 1px top inset so the curve doesn't kiss the edge */
+    const y = (1 - v) * yRange + topInset;
     return [x, y];
   });
   const d = smoothAreaPath(points, height);
@@ -3718,12 +4510,6 @@ function IntensityCurve({
   const activeOnCurve = activeIdx >= 0 && activeIdx < n ? points[activeIdx] : null;
 
   const flatOpacity = hasVariance ? 1 : 0.45;
-  /* Stroke + active-marker radii scale gently with the rendered height
-     so the larger curve in the detail panel reads as a proper hero
-     visual instead of a stretched pill thumbnail. */
-  const strokeW    = Math.max(2.5, height / 24);
-  const haloR      = Math.max(4.5, height / 16);
-  const dotR       = Math.max(2.6, height / 24);
 
   return (
     <svg

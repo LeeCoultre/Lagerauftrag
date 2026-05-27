@@ -33,6 +33,8 @@ import {
   Page, Topbar, Eyebrow, Lead, StudioFrame, T,
 } from '@/components/ui.jsx';
 import BerichteAnalytics from './BerichteAnalytics.jsx';
+import BetaBerichte from './BetaBerichte';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 const RECENT_KEY = 'marathon.berichte.recent';
 const RECENT_MAX = 8;
@@ -46,6 +48,16 @@ const FORMATS = [
 
 /* ════════════════════════════════════════════════════════════════════════ */
 export default function BerichteScreen() {
+  // v2.4 redesign lives behind the global beta-design toggle so the
+  // classic Report Studio remains byte-identical for users who haven't
+  // opted in. The two screens share /api/reports/aggregates but render
+  // entirely different layouts; no cross-pollination of state.
+  const { beta } = useBetaDesign();
+  if (beta) return <BetaBerichte />;
+  return <ClassicBerichteScreen />;
+}
+
+function ClassicBerichteScreen() {
   const today = new Date();
   const todayIso = isoDate(today);
 

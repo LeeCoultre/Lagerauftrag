@@ -41,6 +41,7 @@ import PalletStoryCard from '@/components/PalletStoryCard.jsx';
 import PalletMiniCard from '@/components/PalletMiniCard.jsx';
 import PalletStackViz from '@/components/PalletStackViz.jsx';
 import CancelAuftragModal from '@/components/CancelAuftragModal';
+import { useConfirm } from '@/components/ConfirmDialog';
 import { analyzeAuftrag } from '@/utils/preflightAnalyzer.js';
 import { buildPalletStory, rankPallets } from '@/utils/palletStory.js';
 
@@ -58,7 +59,19 @@ export default function PruefenScreen() {
 
 /* ════════════════════════════════════════════════════════════════════════ */
 function ClassicPruefen() {
-  const { current, goToStep, cancelCurrent, moveEskuToPallet } = useAppState();
+  const { current, goToStep, leaveCurrent, moveEskuToPallet } = useAppState();
+  const confirm = useConfirm();
+  const onVerlassen = async () => {
+    const ok = await confirm({
+      message: 'Auftrag endgültig löschen?',
+      detail: 'Der gesamte Fortschritt und der Auftrag selbst werden ' +
+              'unwiderruflich entfernt — kein Zurück.',
+      confirmLabel: 'Löschen',
+      cancelLabel: 'Abbrechen',
+      danger: true,
+    });
+    if (ok) leaveCurrent();
+  };
   const rawPallets = current?.parsed?.pallets || [];
   const eskuItems  = current?.parsed?.einzelneSkuItems || [];
   const eskuOverrides = current?.eskuOverrides || {};
@@ -354,7 +367,7 @@ function ClassicPruefen() {
           { label: 'Prüfen' },
         ]}
         right={
-          <Button variant="ghost" size="sm" onClick={cancelCurrent} title="Auftrag abbrechen, zurück zur Warteschlange">
+          <Button variant="ghost" size="sm" onClick={onVerlassen} title="Auftrag verlassen — wird endgültig gelöscht">
             Verlassen
           </Button>
         }
@@ -2050,7 +2063,19 @@ function formatDur(sec) {
    and Focus-gate logic is preserved.
    ════════════════════════════════════════════════════════════════════════ */
 function BetaPruefen() {
-  const { current, goToStep, moveEskuToPallet, cancelCurrent, abortCurrent } = useAppState();
+  const { current, goToStep, moveEskuToPallet, leaveCurrent, abortCurrent } = useAppState();
+  const confirmBeta = useConfirm();
+  const onVerlassenBeta = async () => {
+    const ok = await confirmBeta({
+      message: 'Auftrag endgültig löschen?',
+      detail: 'Der gesamte Fortschritt und der Auftrag selbst werden ' +
+              'unwiderruflich entfernt — kein Zurück.',
+      confirmLabel: 'Löschen',
+      cancelLabel: 'Abbrechen',
+      danger: true,
+    });
+    if (ok) leaveCurrent();
+  };
   const [stornoOpen, setStornoOpen] = useState(false);
   const rawPallets = current?.parsed?.pallets || [];
   const eskuItems  = current?.parsed?.einzelneSkuItems || [];
@@ -2361,8 +2386,8 @@ function BetaPruefen() {
         }}>
           <button
             type="button"
-            onClick={cancelCurrent}
-            title="Auftrag verlassen, zurück in die Warteschlange"
+            onClick={onVerlassenBeta}
+            title="Auftrag verlassen — wird endgültig gelöscht"
             style={{
               all: 'unset',
               cursor: 'pointer',

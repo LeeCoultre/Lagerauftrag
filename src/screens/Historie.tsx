@@ -1063,12 +1063,17 @@ function RowCard({
 }) {
   const fba = entry.fbaCode || entry.fileName;
   const isCancelled = entry.status === 'cancelled';
-  const palTimings = useMemo(
-    () => (Object.values(entry.palletTimings || {}) as Array<{ startedAt?: number; finishedAt?: number }>)
+  // Per-pallet seconds come from the backend in effective form
+  // (lunch + non-working hours stripped). Falls back to wall-clock for
+  // legacy rows that pre-date the work-schedule rollout.
+  const palTimings = useMemo(() => {
+    const eff = (entry.palletEffectiveSeconds || {}) as Record<string, number>;
+    const keys = Object.keys(eff);
+    if (keys.length > 0) return keys.map((k) => eff[k]).filter((v) => v > 0);
+    return (Object.values(entry.palletTimings || {}) as Array<{ startedAt?: number; finishedAt?: number }>)
       .map((t) => (t.startedAt && t.finishedAt) ? Math.round((t.finishedAt - t.startedAt) / 1000) : null)
-      .filter((v) => v != null),
-    [entry.palletTimings],
-  );
+      .filter((v) => v != null);
+  }, [entry.palletEffectiveSeconds, entry.palletTimings]);
   const ehPerMin = entry._ehPerMin;
   const cmpPct = medianDur > 0 && entry.durationSec
     ? Math.round(((entry.durationSec - medianDur) / medianDur) * 100)
@@ -1350,7 +1355,7 @@ function IconBtn({ children, onClick, title, danger }: { children?: React.ReactN
 /* ════════════════════════════════════════════════════════════════════════
    Expanded detail — Gantt timing + lazy article fetch
    ════════════════════════════════════════════════════════════════════════ */
-function ExpandedDetail({ entry }: { entry: { id: string; fileName?: string | null; palletCount?: number; articleCount?: number; durationSec?: number | null; palletTimings?: Record<string, { startedAt?: number; finishedAt?: number }>; status?: string }; onClose?: () => void }) {
+function ExpandedDetail({ entry }: { entry: { id: string; fileName?: string | null; palletCount?: number; articleCount?: number; durationSec?: number | null; palletTimings?: Record<string, { startedAt?: number; finishedAt?: number }>; palletEffectiveSeconds?: Record<string, number>; status?: string }; onClose?: () => void }) {
   const detailQ = useQuery({
     queryKey: ['auftrag', entry.id],
     queryFn: () => getAuftrag(entry.id),
@@ -1395,26 +1400,34 @@ function ExpandedDetail({ entry }: { entry: { id: string; fileName?: string | nu
   }, [detailQ.data]);
 
   const palletGantt = useMemo(() => {
-    /* Build [{id, level, durSec, startMs, endMs}] in pallet order. */
+    /* Build [{id, level, durSec, startMs, endMs}] in pallet order.
+       Duration prefers backend-computed effective seconds (lunch +
+       non-work hours stripped); wall-clock startMs/endMs stay for the
+       gantt-bar layout so the visual gap of an overnight Auftrag is
+       still visible. */
     const pallets = detailQ.data?.parsed?.pallets || [];
     const lookup = new Map(pallets.map((p) => [p.id, p]));
+    const eff = (entry.palletEffectiveSeconds || {}) as Record<string, number>;
     const rows: { id: string; level: number; durSec: number; startMs: number; endMs: number }[] = [];
     for (const [id, t] of Object.entries((entry.palletTimings || {}) as Record<string, { startedAt?: number; finishedAt?: number }>)) {
       if (!t.startedAt || !t.finishedAt) continue;
       const p = lookup.get(id);
       const items = p?.items || [];
       const lvl = items.length ? primaryLevelOf(items) : 1;
+      const durSec = (eff[id] != null && eff[id] > 0)
+        ? eff[id]
+        : Math.round((t.finishedAt - t.startedAt) / 1000);
       rows.push({
         id,
         level: lvl,
-        durSec: Math.round((t.finishedAt - t.startedAt) / 1000),
+        durSec,
         startMs: t.startedAt,
         endMs:   t.finishedAt,
       });
     }
     rows.sort((a, b) => a.startMs - b.startMs);
     return rows;
-  }, [entry.palletTimings, detailQ.data]);
+  }, [entry.palletTimings, entry.palletEffectiveSeconds, detailQ.data]);
 
   const ganttTotal = palletGantt.reduce((s, r) => s + r.durSec, 0);
 
@@ -2589,12 +2602,14 @@ function BetaHistorieRow({
 }: any) {
   const fba = entry.fbaCode || entry.fileName;
   const isCancelled = entry.status === 'cancelled';
-  const palTimings = useMemo(
-    () => (Object.values(entry.palletTimings || {}) as Array<{ startedAt?: number; finishedAt?: number }>)
+  const palTimings = useMemo(() => {
+    const eff = (entry.palletEffectiveSeconds || {}) as Record<string, number>;
+    const keys = Object.keys(eff);
+    if (keys.length > 0) return keys.map((k) => eff[k]).filter((v): v is number => v > 0);
+    return (Object.values(entry.palletTimings || {}) as Array<{ startedAt?: number; finishedAt?: number }>)
       .map((t) => (t.startedAt && t.finishedAt) ? Math.round((t.finishedAt - t.startedAt) / 1000) : null)
-      .filter((v): v is number => v != null),
-    [entry.palletTimings],
-  );
+      .filter((v): v is number => v != null);
+  }, [entry.palletEffectiveSeconds, entry.palletTimings]);
   const ehPerMin = entry._ehPerMin;
   const cmpPct = medianDur > 0 && entry.durationSec
     ? Math.round(((entry.durationSec - medianDur) / medianDur) * 100)

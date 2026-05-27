@@ -23,15 +23,20 @@ async def test_start_nonexistent_returns_404(client, admin, as_user):
     assert r.status_code == 404
 
 
-async def test_delete_in_progress_returns_409(client, admin, as_user):
-    """Can only delete queued (or error) Auftraege, not in-progress ones."""
+async def test_delete_in_progress_by_owner_succeeds(client, admin, as_user):
+    """The assigned worker may permanently delete their in_progress Auftrag
+    (Verlassen = wipe row + cascade pallet_claims). Audit log entries
+    survive via ON DELETE SET NULL."""
     as_user(admin)
     r = await client.post("/api/auftraege", json=make_payload())
     a_id = r.json()["id"]
     await client.post(f"/api/auftraege/{a_id}/start")
 
     r = await client.delete(f"/api/auftraege/{a_id}")
-    assert r.status_code == 409
+    assert r.status_code == 204
+
+    r = await client.get(f"/api/auftraege/{a_id}")
+    assert r.status_code == 404
 
 
 async def test_progress_on_queued_returns_409(client, admin, as_user):

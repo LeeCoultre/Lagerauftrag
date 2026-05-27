@@ -33,6 +33,7 @@ import type {
   UserPalletProgress,
 } from '@/types/api';
 import { useMe } from '@/hooks/useMe';
+import { useBetaDesign } from '@/hooks/useBetaDesign';
 
 const STALE_MS = 5 * 60 * 1000;
 const HEARTBEAT_MS = 30 * 1000;
@@ -107,6 +108,7 @@ export function useFocusSession(
 ): UseFocusSessionResult {
   const qc = useQueryClient();
   const me = useMe().data;
+  const { beta } = useBetaDesign();
 
   const auftragId = auftrag?.id ?? null;
   const meId = me?.id ?? null;
@@ -169,6 +171,17 @@ export function useFocusSession(
   const onSettled = useCallback(() => {
     qc.invalidateQueries({ queryKey: ['auftraege'] });
   }, [qc]);
+  /* Beta: claim/release already do an optimistic onMutate patch + the
+     Focus screen polls ['auftraege'] every 5s anyway, so a blanket
+     onSettled invalidate is redundant and was visibly snapping the
+     pallet state back-and-forth on fast claim/release clicks. In beta
+     we drop it from claim/release (keep on join/leave/takeover where
+     there's no optimistic patch). Invalidate still happens via onError
+     as a safety net if the server rejects the change. */
+  const claimReleaseOnSettled = beta ? undefined : onSettled;
+  const invalidateOnError = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ['auftraege'] });
+  }, [qc]);
 
   const joinMut = useMutation<AuftragDetail, ApiError, UUID, { prev?: AuftragDetail[] }>({
     mutationFn: (id) => apiJoin(id),
@@ -214,8 +227,9 @@ export function useFocusSession(
     },
     onError: (_e, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+      if (beta) invalidateOnError();
     },
-    onSettled,
+    onSettled: claimReleaseOnSettled,
   });
 
   const releaseMut = useMutation<
@@ -240,8 +254,9 @@ export function useFocusSession(
     },
     onError: (_e, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+      if (beta) invalidateOnError();
     },
-    onSettled,
+    onSettled: claimReleaseOnSettled,
   });
 
   const takeoverMut = useMutation<

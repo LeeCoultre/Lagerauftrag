@@ -17,7 +17,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-const KEY = 'marathon.recent_uploads.v1';
+export const RECENT_UPLOADS_KEY = 'marathon.recent_uploads.v1';
+export const RECENT_UPLOADS_EVENT = 'marathon:recent_uploads_changed';
+const KEY = RECENT_UPLOADS_KEY;
 const MAX = 5;
 
 function read() {
@@ -39,14 +41,26 @@ export function useRecentUploads() {
   const [items, setItems] = useState(read);
 
   /* Keep multiple tabs/sessions in sync — storage event fires when
-     another window writes the same key. */
+     another window writes the same key. Also listen to an in-window
+     custom event so that non-hook helpers (e.g. state.tsx's leaveMut
+     cleanup) can mutate the list and have all live hooks re-read. */
   useEffect(() => {
-    const onStorage = (e) => {
+    const onStorage = (e: StorageEvent) => {
       if (e.key === KEY) setItems(read());
     };
+    const onCustom = () => setItems(read());
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener(RECENT_UPLOADS_EVENT, onCustom);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener(RECENT_UPLOADS_EVENT, onCustom);
+    };
   }, []);
+
+  const broadcast = () => {
+    try { window.dispatchEvent(new Event(RECENT_UPLOADS_EVENT)); }
+    catch { /* SSR or restricted env — silent */ }
+  };
 
   const add = useCallback((entry) => {
     if (!entry?.id) return;
@@ -56,6 +70,7 @@ export function useRecentUploads() {
         ...prev.filter((e) => e.id !== entry.id),
       ].slice(0, MAX);
       write(next);
+      broadcast();
       return next;
     });
   }, []);
@@ -64,6 +79,7 @@ export function useRecentUploads() {
     setItems((prev) => {
       const next = prev.filter((e) => e.id !== id);
       write(next);
+      broadcast();
       return next;
     });
   }, []);
@@ -71,7 +87,22 @@ export function useRecentUploads() {
   const clear = useCallback(() => {
     write([]);
     setItems([]);
+    broadcast();
   }, []);
 
   return { items, add, remove, clear };
+}
+
+/* Imperative helper for non-React code (e.g. state.tsx's leaveMut cleanup).
+   Removes the entry by auftrag id, persists, and notifies every live
+   `useRecentUploads` hook in the same window via the custom event. */
+export function removeFromRecentUploads(id: string): void {
+  if (!id || typeof window === 'undefined') return;
+  try {
+    const list = read();
+    const next = list.filter((e: { id?: string }) => e?.id !== id);
+    if (next.length === list.length) return;
+    write(next);
+    window.dispatchEvent(new Event(RECENT_UPLOADS_EVENT));
+  } catch { /* ignore */ }
 }

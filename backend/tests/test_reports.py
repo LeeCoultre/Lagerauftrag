@@ -165,3 +165,83 @@ async def test_aggregates_level_filter(client, user, as_user):
     today_keys = {int(k) for k in today_stack["values"].keys()}
     assert today_keys.issubset({1, 7})
     assert 4 not in today_keys
+
+
+async def test_aggregates_kpi_rollups(client, user, as_user):
+    """v2.4 KPIs — articles/units totals + productivity. No prices in the
+    DB, so items_value_eur stays 0 and coverage_pct = 0. The shape and
+    Σ-correctness are what matter here."""
+    as_user(user)
+
+    a1 = (await client.post("/api/auftraege", json=_payload(
+        "kpi-a.docx",
+        ("Thermorollen 80mm", 10, 2),  # L1
+        ("Klebeband 50mm",     5, 1),  # L4
+    ))).json()["id"]
+    a2 = (await client.post("/api/auftraege", json=_payload(
+        "kpi-b.docx",
+        ("Tachorollen DTCO",   3, 4),  # L7
+    ))).json()["id"]
+
+    for aid in (a1, a2):
+        await client.post(f"/api/auftraege/{aid}/start")
+        await client.post(f"/api/auftraege/{aid}/complete")
+
+    body = (await client.get("/api/reports/aggregates?days=30")).json()
+
+    # 3 items total across both Aufträge.
+    assert body["articles_total"] == 3
+    # Σ units = 10+5+3 = 18.
+    assert body["units_total"] == 18
+    # No prices yet → value/coverage zero.
+    assert body["items_value_eur"] == 0.0
+    assert body["items_value_coverage_pct"] == 0.0
+    # Productivity needs the test to span observable working time. Both
+    # /start and /complete fire within the same second, so effective time
+    # may be 0 — only assert it's a non-negative number.
+    assert body["productivity_units_per_hour"] >= 0
+
+
+async def test_aggregates_items_value_eur(client, user, as_user):
+    """When a sku_dimensions row carries `price_per_einheit_eur` and an
+    Auftrag item references the same FNSKU, the cost rolls up into
+    `items_value_eur` AND the per-level `cost_eur` field."""
+    from backend.database import AsyncSessionLocal
+    from backend.orm import SkuDimension
+
+    async with AsyncSessionLocal() as s:
+        s.add(SkuDimension(
+            fnskus=["X0FAKE1234"], skus=[], eans=[],
+            title="EC Thermorollen 80mm test",
+            length_cm=10, width_cm=10, height_cm=10, weight_kg=1.0,
+            price_per_einheit_eur=7.5,
+        ))
+        await s.commit()
+
+    as_user(user)
+    a_id = (await client.post("/api/auftraege", json={
+        "file_name": "priced.docx",
+        "parsed": {
+            "meta": {"sendungsnummer": "T-1", "totalUnits": 20},
+            "pallets": [{
+                "id": "P1",
+                "items": [
+                    {"title": "EC Thermorollen 80mm", "units": 20, "rollen": 5,
+                     "fnsku": "X0FAKE1234"},
+                ],
+            }],
+        },
+    })).json()["id"]
+    await client.post(f"/api/auftraege/{a_id}/start")
+    await client.post(f"/api/auftraege/{a_id}/complete")
+
+    body = (await client.get("/api/reports/aggregates?days=30")).json()
+
+    # 20 units × 7.5 EUR = 150.00
+    assert body["items_value_eur"] == 150.0
+    # 1 of 1 items had a price.
+    assert body["items_value_coverage_pct"] == 100.0
+    # L1 Thermo bucket carries the cost.
+    by_level = {b["level"]: b for b in body["by_level"]}
+    assert by_level[1]["cost_eur"] == 150.0
+    assert by_level[1]["units"] == 20

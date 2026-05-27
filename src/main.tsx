@@ -23,7 +23,7 @@ if (SENTRY_DSN) {
   Sentry.init({
     dsn: SENTRY_DSN,
     environment: import.meta.env.MODE,
-    release: 'marathon@2.2.0',
+    release: 'marathon@2.4.0',
     tracesSampleRate: 0,
     sendDefaultPii: false,
   })
@@ -43,15 +43,35 @@ if (!CLERK_KEY) {
   throw new Error('VITE_CLERK_PUBLISHABLE_KEY is not set. See .env.example.')
 }
 
+/* Beta-design opt-in: read synchronously here (same key as
+   useBetaDesign.tsx) so the QueryClient defaults can pick the safer
+   set without waiting for React to mount. Classic defaults are
+   preserved byte-identical when beta is off. */
+const isBetaDesign = (() => {
+  try { return localStorage.getItem('marathon.beta.design') === '1'; }
+  catch { return false; }
+})()
+
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: {
-      // Auftraege list refetches every 5s so other users' actions show up.
-      refetchInterval: 5000,
-      refetchOnWindowFocus: true,
-      staleTime: 2000,
-      retry: 1,
-    },
+    queries: isBetaDesign
+      ? {
+          /* Beta: kill global auto-refetch. Queries that need polling
+             (auftraege in Focus, useApiHealth, useMyShift, etc.) opt
+             in explicitly. Eliminates the "UI teleport" caused by
+             background refetches overwriting optimistic patches. */
+          refetchInterval: false,
+          refetchOnWindowFocus: false,
+          staleTime: 30_000,
+          retry: 1,
+        }
+      : {
+          // Auftraege list refetches every 5s so other users' actions show up.
+          refetchInterval: 5000,
+          refetchOnWindowFocus: true,
+          staleTime: 2000,
+          retry: 1,
+        },
   },
 })
 

@@ -92,8 +92,10 @@ export interface UseAppStateApi {
 
   completeCurrentItem: (effectiveItemsCount?: number, effectiveItem?: unknown, nextPalletIdxOverride?: number) => boolean;
   completeAndAdvance: () => void;
-  /** Release the active Auftrag back to the queue (Verlassen — keeps row alive). */
+  /** Release the active Auftrag back to the queue (keeps row alive — internal multi-user flows). */
   cancelCurrent: () => void;
+  /** Verlassen — permanently delete the active Auftrag (row + claims) from the DB. */
+  leaveCurrent: () => void;
   /** Terminal cancel (Stornieren) — row lands in Historie with a red border. */
   abortCurrent: (payload: WorkflowAbortPayload) => void;
 

@@ -309,9 +309,22 @@ a { color: inherit; text-decoration: none; }
   animation: mr-flow-promote 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* Beta-only — pallet arrives in the BetaIslandBar's «Done» tray after
+   leaving the FlowLeftRail. Drops down from above the bar with a small
+   bounce + opacity fade so the migration reads as a single gesture. */
+@keyframes mr-done-chip-enter {
+  0%   { opacity: 0; transform: translateY(-14px) scale(0.7); }
+  60%  { opacity: 1; transform: translateY(2px)   scale(1.06); }
+  100% { opacity: 1; transform: translateY(0)     scale(1); }
+}
+.mr-done-chip-enter {
+  animation: mr-done-chip-enter 380ms cubic-bezier(0.34, 1.45, 0.64, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mr-rise, .mr-pulse, .mr-finale-burst, .mr-pallet-wipe, .mr-recopy-flash,
-  .mr-hero-land, .mr-hint-swap, .mr-live-dot, .mr-flow-promote { animation: none !important; }
+  .mr-hero-land, .mr-hint-swap, .mr-live-dot, .mr-flow-promote,
+  .mr-done-chip-enter { animation: none !important; }
   @keyframes keynote-slide-in {
     from { opacity: 0; }
     to   { opacity: 1; }

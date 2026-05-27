@@ -75,7 +75,7 @@ export default function UploadScreen({ onRoute }) {
   const goSeqRef = useRef({ ts: 0 }); /* `g w` / `g h` sequence buffer */
 
   /* ── duplicate detector ───────────────────────────────────────── */
-  const dupIndex = useMemo(() => buildDupIndex(queue, recent), [queue, recent]);
+  const dupIndex = useMemo(() => buildDupIndex(queue, recent, history), [queue, recent, history]);
   const detectDupes = useCallback(
     (files) => files.map((f) => ({
       file: f,
@@ -109,21 +109,46 @@ export default function UploadScreen({ onRoute }) {
 
     /* Per-file serialised pipeline so the operator sees each row resolve
        in turn. addFiles parses + saves; we interpret the returned entry
-       (or empty array on error). */
+       (or empty array on error).
+
+       Mid-batch abort: if a network error fires (TypeError/Failed to
+       fetch) or the offline probe flips to offline, every remaining
+       file is short-circuited to an explicit error stage — far better
+       than letting them silently fail in a tight retry loop, which
+       would also race against the server's auto-recover. */
     const built: LegacyAuftrag[] = [];
+    let networkAborted = false;
     for (let i = 0; i < files.length; i++) {
+      if (networkAborted) {
+        setBatch((prev) => prev.map((b, idx) => idx >= i
+          ? { ...b, stage: 'error', error: 'Übersprungen — Server offline, Batch abgebrochen.' }
+          : b));
+        break;
+      }
       const f = files[i];
       setBatch((prev) => prev.map((b, idx) => idx === i ? { ...b, stage: 'parsing' } : b));
       let result: LegacyAuftrag | null = null;
+      let errMsg: string | null = null;
       try {
         const created = await addFiles([f]);
         result = created[0] || null;
-      } catch {
+      } catch (err) {
         result = null;
+        if (err instanceof Error) {
+          errMsg = err.message || null;
+          /* Detect transport failure (fetch refused, DNS, etc.) — break
+             out of the batch instead of pummeling a dead server. */
+          if (/failed to fetch|network|networkerror/i.test(err.message)) {
+            networkAborted = true;
+          }
+        }
       }
       if (!result) {
+        const fallback = networkAborted
+          ? 'Server offline — Datei konnte nicht hochgeladen werden.'
+          : (errMsg || 'Server hat nicht geantwortet oder Datei ist ungültig.');
         setBatch((prev) => prev.map((b, idx) => idx === i
-          ? { ...b, stage: 'error', error: 'Server hat nicht geantwortet oder Datei ist ungültig.' }
+          ? { ...b, stage: 'error', error: fallback }
           : b));
         continue;
       }
@@ -2127,12 +2152,31 @@ const inlineCodeStyle = {
 };
 
 /* ─── Duplicate detection ───────────────────────────────────────── */
-function buildDupIndex(queue, recent) {
+/* Precedence (most actionable first):
+     queue      — file already waits to be worked on
+     history    — file was completed or stornoed in the past
+     recent     — local localStorage breadcrumb (subset of the two above
+                  in normal flow, but survives full backend wipe and
+                  cross-tab unwinds, so it earns its own bucket as a
+                  fallback signal). */
+function buildDupIndex(queue, recent, history) {
   const byFile = new Map();
-  for (const q of queue) {
+  for (const q of (queue || [])) {
     if (q.fileName) byFile.set(q.fileName.toLowerCase(), { where: 'in Warteschlange', relative: '' });
   }
-  for (const r of recent) {
+  for (const h of (history || [])) {
+    if (h.fileName) {
+      const existing = byFile.get(h.fileName.toLowerCase());
+      if (!existing) {
+        const ts = h.finishedAt ?? h.startedAt ?? null;
+        byFile.set(h.fileName.toLowerCase(), {
+          where: 'in der Historie',
+          relative: ts ? formatRelative(ts) : '',
+        });
+      }
+    }
+  }
+  for (const r of (recent || [])) {
     if (r.fileName) {
       const existing = byFile.get(r.fileName.toLowerCase());
       if (!existing) {

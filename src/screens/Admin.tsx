@@ -20,13 +20,15 @@ import {
   Page, Topbar, Card, SectionHeader, Eyebrow, PageH1, Lead, Badge, Kpi, T,
 } from '@/components/ui.jsx';
 import DimensionsTab from './admin/DimensionsTab.jsx';
+import ArbeitszeitTab from './admin/ArbeitszeitTab';
 
 const TABS = [
-  { id: 'auftraege',  label: 'Aufträge'   },
-  { id: 'users',      label: 'Benutzer'   },
-  { id: 'audit',      label: 'Audit-Log'  },
-  { id: 'kpi',        label: 'KPIs'       },
-  { id: 'dimensions', label: 'Dimensions' },
+  { id: 'auftraege',   label: 'Aufträge'    },
+  { id: 'users',       label: 'Benutzer'    },
+  { id: 'audit',       label: 'Audit-Log'   },
+  { id: 'kpi',         label: 'KPIs'        },
+  { id: 'dimensions',  label: 'Dimensions'  },
+  { id: 'arbeitszeit', label: 'Arbeitszeit' },
 ];
 
 const PAGE_SIZE = 25;
@@ -65,11 +67,12 @@ export default function AdminScreen() {
         <TabBar tabs={TABS} active={tab} onSelect={setTab} />
 
         <div style={{ marginTop: 24 }}>
-          {tab === 'auftraege'  && <AuftraegeTab />}
-          {tab === 'users'      && <UsersTab />}
-          {tab === 'audit'      && <AuditTab />}
-          {tab === 'kpi'        && <KpiTab />}
-          {tab === 'dimensions' && <DimensionsTab />}
+          {tab === 'auftraege'   && <AuftraegeTab />}
+          {tab === 'users'       && <UsersTab />}
+          {tab === 'audit'       && <AuditTab />}
+          {tab === 'kpi'         && <KpiTab />}
+          {tab === 'dimensions'  && <DimensionsTab />}
+          {tab === 'arbeitszeit' && <ArbeitszeitTab />}
         </div>
       </main>
     </Page>

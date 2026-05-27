@@ -16,6 +16,7 @@ import { createContext, useCallback, useMemo, useState, type ReactNode } from 'r
 import { useAuth } from '@clerk/clerk-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useFocusActive } from './hooks/useFocusPresence';
+import { useBetaDesign } from './hooks/useBetaDesign';
 import mammoth from 'mammoth';
 import {
   parseLagerauftragText, validateParsing,
@@ -23,6 +24,7 @@ import {
 import { sortPallets, enrichItemDims } from './utils/auftragHelpers.js';
 import { scanFnskuCodesZoned } from './utils/fnskuScanner';
 import { validateFnskuAgainstParserZoned } from './utils/fnskuValidator';
+import { removeFromRecentUploads } from './hooks/useRecentUploads';
 import {
   listAuftraege, createAuftrag, getAuftrag, deleteAuftrag, reorderQueue as apiReorder,
   startAuftrag, updateProgress, completeAuftrag, cancelAuftrag, abortAuftrag,
@@ -208,6 +210,7 @@ export function useAppState(): UseAppStateApi {
   const qc = useQueryClient();
   const { isSignedIn } = useAuth();
   const effectivelySignedIn = isSignedIn || ALLOW_ANONYMOUS;
+  const { beta } = useBetaDesign();
 
   /* ── Queries ───────────────────────────────────────────────────────── */
   const meQ = useQuery({
@@ -298,6 +301,22 @@ export function useAppState(): UseAppStateApi {
     qc.invalidateQueries({ queryKey: ['history'] });
   };
 
+  /* Beta-aware optimistic rollback. Classic always rolls back; beta only
+     rolls back on definitive 4xx (server rejected the request). For
+     network/timeout/5xx the server may have committed the change — a
+     rollback there causes a visible "teleport back" until the invalidate
+     refetch resyncs from server truth. */
+  const rollbackIfDefinite = (
+    err: unknown,
+    prev: AuftragDetail[] | AuftragSummary[] | undefined,
+  ) => {
+    if (!prev) return;
+    const status = (err as ApiError | null)?.status;
+    const isDefinite4xx =
+      beta && typeof status === 'number' && status >= 400 && status < 500;
+    if (!beta || isDefinite4xx) qc.setQueryData(['auftraege'], prev);
+  };
+
   /* createMut populates the cache directly with the server-returned
      Detail instead of invalidating ['auftraege'] and waiting for a
      refetch. Without this, the new Auftrag sits invisible to the
@@ -335,8 +354,8 @@ export function useAppState(): UseAppStateApi {
       );
       return { prev };
     },
-    onError: (_err, _id, ctx) => {
-      if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+    onError: (err, _id, ctx) => {
+      rollbackIfDefinite(err, ctx?.prev);
       invalidateAll();
     },
     onSuccess: () => {
@@ -392,9 +411,41 @@ export function useAppState(): UseAppStateApi {
       // but the auftraege list is already in the right shape locally.
       qc.invalidateQueries({ queryKey: ['history'] });
     },
-    onError: (_err, _id, ctx) => {
-      if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+    onError: (err, _id, ctx) => {
+      rollbackIfDefinite(err, ctx?.prev);
       invalidateAll();
+    },
+  });
+
+  /* Terminal "Verlassen" — permanently deletes the active Auftrag from
+     the DB (and its cascade-linked pallet_claims). Distinct from /cancel
+     which would put the row back into the queue. Optimistic update
+     drops the row from cache immediately so the UI flips to the empty
+     Workspace / next queued Auftrag without waiting on the network. */
+  const leaveMut = useMutation<null, Error, UUID, { prev?: AuftragDetail[] }>({
+    mutationFn: deleteAuftrag,
+    onMutate: async (id) => {
+      await qc.cancelQueries({ queryKey: ['auftraege'] });
+      const prev = qc.getQueryData<AuftragDetail[]>(['auftraege']);
+      qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
+        (old || []).filter((a) => a.id !== id),
+      );
+      return { prev };
+    },
+    onSuccess: (_data, id) => {
+      clearCopiedKeys(id);
+      clearEskuOverrides(id);
+      /* Drop from the recent-uploads localStorage so the file-dedup
+         check in Upload doesn't flag a re-upload as «schon vorhanden»
+         after the Auftrag has been permanently deleted. */
+      removeFromRecentUploads(id);
+      // Audit log entries survive via ON DELETE SET NULL; admin views
+      // refresh their own data. Nothing else to do — the row is gone.
+    },
+    onError: (err, _id, ctx) => {
+      rollbackIfDefinite(err, ctx?.prev);
+      invalidateAll();
+      alert('Auftrag konnte nicht gelöscht werden — bitte erneut versuchen.');
     },
   });
 
@@ -448,7 +499,7 @@ export function useAppState(): UseAppStateApi {
       );
     },
     onError: (err, _id, ctx) => {
-      if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
+      rollbackIfDefinite(err, ctx?.prev);
       const status = (err as ApiError | null)?.status;
       const detail = (err as ApiError | null)?.detail;
       const detailStr = typeof detail === 'string' ? detail : '';
@@ -513,32 +564,93 @@ export function useAppState(): UseAppStateApi {
       await qc.cancelQueries({ queryKey: ['auftraege'] });
       const prev = qc.getQueryData<AuftragSummary[]>(['auftraege']);
       qc.setQueryData<AuftragSummary[]>(['auftraege'], (old) =>
-        (old || []).map((a) => (a.id === id ? { ...a, ...(payload as Partial<AuftragSummary>) } : a)),
+        (old || []).map((a) => {
+          if (a.id !== id) return a;
+          const patched = { ...a, ...(payload as Partial<AuftragSummary>) };
+          /* Beta: object-shaped payload fields are MERGE-on-server
+             (backend update_progress lines 423/440/460). When the user
+             fires "Fertig" twice faster than React can re-render, the
+             second click's payload is built from a stale `current.*`
+             closure and only carries the newest key — a blanket spread
+             would erase the first click's optimistic entry from cache
+             until the server's merged response arrives (~300ms flash
+             of stale completed-count in the UI). Mirror the server's
+             merge in onMutate so cache stays union-correct under
+             rapid-fire interactions. */
+          if (beta) {
+            const p = payload as Record<string, unknown>;
+            for (const dictKey of ['completedKeys', 'palletTimings', 'copiedKeys'] as const) {
+              const incoming = p[dictKey];
+              if (incoming && typeof incoming === 'object') {
+                const existing = (a as unknown as Record<string, unknown>)[dictKey];
+                (patched as unknown as Record<string, unknown>)[dictKey] = {
+                  ...((existing as object | null) ?? {}),
+                  ...(incoming as object),
+                };
+              }
+            }
+          }
+          return patched;
+        }),
       );
       return { prev };
     },
-    onSuccess: (data, { id }) => {
+    onSuccess: (data, { id, payload }) => {
       /* Patch the server's authoritative response into cache instead of
          invalidating + refetching. Defensive merge: if the response is
          missing `parsed` (backend transient / stripped serialization),
          keep what cache had — never overwrite a populated parsed with
-         null, that's the "Pruefen suddenly empty" bug. */
+         null, that's the "Pruefen suddenly empty" bug.
+
+         Beta: when the user fires multiple progress updates in quick
+         succession (e.g. clicking pallet B → C → D in PalletFlow), the
+         PATCH responses arrive in unspecified order. A late response
+         from the B mutation carries currentPalletIdx=B in its payload,
+         and a blanket `...data` spread would overwrite cache's freshly
+         optimistic D — visible teleport B→C→D→B→C→D. Skip the
+         payload-touched fields in the merge: cache already holds the
+         newest optimistic value, and the next stable mutation will
+         resync them via its own onMutate patch. */
       qc.setQueryData<AuftragDetail[]>(['auftraege'], (old) =>
         (old || []).map((a) => {
           if (a.id !== id) return a;
-          return {
+          const merged: AuftragDetail = {
             ...data,
             parsed: data.parsed ?? a.parsed,
             rawText: data.rawText ?? a.rawText,
             validation: data.validation ?? a.validation,
           };
+          if (beta && payload && typeof payload === 'object') {
+            const DICT_KEYS = ['completedKeys', 'palletTimings', 'copiedKeys'] as const;
+            const aRec = a as unknown as Record<string, unknown>;
+            const dataRec = data as unknown as Record<string, unknown>;
+            const mergedRec = merged as unknown as Record<string, unknown>;
+            for (const key of Object.keys(payload)) {
+              if (!(key in a)) continue;
+              if ((DICT_KEYS as readonly string[]).includes(key)) {
+                /* Union the server response with the cache. Cache wins
+                   for overlapping keys (it carries the freshest
+                   optimistic patches from concurrent fast clicks), server
+                   contributes any keys cache doesn't have yet (e.g.
+                   completedKeys from another worker in multi-user). */
+                mergedRec[key] = {
+                  ...((dataRec[key] as object | null) ?? {}),
+                  ...((aRec[key] as object | null) ?? {}),
+                };
+              } else {
+                /* Scalar fields (currentPalletIdx, currentItemIdx, step):
+                   cache wins to preserve newer optimistic patches from
+                   concurrent mutations whose response landed later. */
+                mergedRec[key] = aRec[key];
+              }
+            }
+          }
+          return merged;
         }),
       );
     },
-    onError: (_e, _vars, ctx) => {
-      if (ctx?.prev) qc.setQueryData(['auftraege'], ctx.prev);
-      // Surface the bad cache state for a refetch — only on the rare
-      // error path; the success path no longer round-trips.
+    onError: (err, _vars, ctx) => {
+      rollbackIfDefinite(err, ctx?.prev);
       qc.invalidateQueries({ queryKey: ['auftraege'] });
     },
   });
@@ -568,6 +680,9 @@ export function useAppState(): UseAppStateApi {
     const [moved] = next.splice(fromIdx, 1);
     next.splice(toIdx, 0, moved);
     const items: AuftragReorderItem[] = next.map((q, i) => ({ id: q.id, queuePosition: i }));
+    // Beta-only: abort any in-flight ['auftraege'] refetch so a slow GET
+    // can't overwrite the optimistic reorder right after the user drops.
+    if (beta) qc.cancelQueries({ queryKey: ['auftraege'] });
     qc.setQueryData<AuftragSummary[]>(['auftraege'], (old) => {
       if (!old) return old;
       const byId = new Map(old.map((a) => [a.id, a]));
@@ -580,7 +695,7 @@ export function useAppState(): UseAppStateApi {
       return [...reordered, ...inProgress];
     });
     reorderMut.mutate(items);
-  }, [queue, qc, reorderMut]);
+  }, [queue, qc, reorderMut, beta]);
 
   const reorderQueueTo = useCallback((orderedIds: UUID[]) => {
     if (!Array.isArray(orderedIds) || orderedIds.length !== queue.length) return;
@@ -592,6 +707,7 @@ export function useAppState(): UseAppStateApi {
     }
     if (!changed) return;
     const items: AuftragReorderItem[] = orderedIds.map((id, i) => ({ id, queuePosition: i }));
+    if (beta) qc.cancelQueries({ queryKey: ['auftraege'] });
     qc.setQueryData<AuftragSummary[]>(['auftraege'], (old) => {
       if (!old) return old;
       const byId = new Map(old.map((a) => [a.id, a]));
@@ -604,7 +720,7 @@ export function useAppState(): UseAppStateApi {
       return [...reordered, ...inProgress];
     });
     reorderMut.mutate(items);
-  }, [queue, qc, reorderMut]);
+  }, [queue, qc, reorderMut, beta]);
 
   const startEntry = useCallback((entryId?: UUID) => {
     if (current) {
@@ -775,6 +891,10 @@ export function useAppState(): UseAppStateApi {
     if (current?.id) cancelMut.mutate(current.id);
   }, [current, cancelMut]);
 
+  const leaveCurrent = useCallback(() => {
+    if (current?.id) leaveMut.mutate(current.id);
+  }, [current, leaveMut]);
+
   const abortCurrent = useCallback((payload: WorkflowAbortPayload) => {
     if (current?.id) abortMut.mutate({ id: current.id, payload });
   }, [current, abortMut]);
@@ -794,7 +914,7 @@ export function useAppState(): UseAppStateApi {
     startEntry, goToStep,
     setCurrentPalletIdx, setCurrentItemIdx, markCodeCopied,
     moveEskuToPallet, resetEskuOverrides,
-    completeCurrentItem, completeAndAdvance, cancelCurrent, abortCurrent,
+    completeCurrentItem, completeAndAdvance, cancelCurrent, leaveCurrent, abortCurrent,
     removeHistoryEntry, clearHistory,
   }), [
     queue, current, history,
@@ -802,7 +922,7 @@ export function useAppState(): UseAppStateApi {
     startEntry, goToStep,
     setCurrentPalletIdx, setCurrentItemIdx, markCodeCopied,
     moveEskuToPallet, resetEskuOverrides,
-    completeCurrentItem, completeAndAdvance, cancelCurrent, abortCurrent,
+    completeCurrentItem, completeAndAdvance, cancelCurrent, leaveCurrent, abortCurrent,
     removeHistoryEntry, clearHistory,
   ]);
 }

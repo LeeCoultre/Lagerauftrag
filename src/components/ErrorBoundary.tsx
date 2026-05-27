@@ -92,7 +92,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
     const payload = [
       `Marathon · ${incidentId}`,
       `Time: ${new Date().toISOString()}`,
-      `Build: 2.2.0`,
+      `Build: 2.4.0`,
       `URL:  ${window.location.href}`,
       `User-Agent: ${navigator.userAgent}`,
       '',

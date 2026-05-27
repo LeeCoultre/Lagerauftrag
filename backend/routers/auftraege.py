@@ -202,10 +202,30 @@ async def delete_auftrag(
     me: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Permanently delete an Auftrag (row + cascade-linked PalletClaim rows;
+    AuditLog rows survive via ON DELETE SET NULL).
+
+    Allowed status:
+      • queued / error      — anyone (these aren't owned by a worker)
+      • in_progress         — only the assigned primary, AND no other
+                              workers may still hold active pallet claims
+                              (mirrors the /cancel safety check)
+    Completed / cancelled rows live in Historie and have their own delete
+    endpoint (DELETE /api/history/{id}, admin-only)."""
     a = await db.get(Auftrag, auftrag_id)
     if a is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Auftrag not found")
-    if a.status not in (AuftragStatus.queued, AuftragStatus.error):
+    if a.status in (AuftragStatus.queued, AuftragStatus.error):
+        pass  # open delete — pre-start row
+    elif a.status == AuftragStatus.in_progress:
+        if a.assigned_to_user_id != me.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your Auftrag")
+        if await _other_active_claim_count(db, auftrag_id, me.id) > 0:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Other workers still have active pallets — wait or coordinate.",
+            )
+    else:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Cannot delete — status is {a.status.value}",

@@ -36,6 +36,7 @@ const baseSummary: AuftragSummary = {
   finishedAt: null,
   durationSec: null,
   palletTimings: {},
+  palletEffectiveSeconds: {},
 };
 
 describe('toLegacy', () => {

@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.deps import get_current_user, require_admin
+from backend.deps import get_current_user, load_work_schedule, require_admin
 from backend.orm import AuditLog, Auftrag, AuftragStatus, User
 from backend.schemas import AuftragSummary, HistoryPage
 
@@ -35,6 +35,7 @@ async def list_history(
     offset: int = Query(0, ge=0),
     me: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    schedule = Depends(load_work_schedule),
 ):
     """Terminal Aufträge (completed + cancelled), newest first. Paginated."""
     base = select(Auftrag).where(
@@ -60,7 +61,9 @@ async def list_history(
     )
     items = [
         AuftragSummary.from_orm_row(
-            r, assigned_to_user_name=name_map.get(r.assigned_to_user_id)
+            r,
+            assigned_to_user_name=name_map.get(r.assigned_to_user_id),
+            schedule=schedule,
         )
         for r in rows
     ]

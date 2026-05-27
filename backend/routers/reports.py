@@ -35,15 +35,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.deps import get_current_user
+from backend.deps import get_current_user, load_work_schedule
 from backend.levels import LEVEL_COUNT, level_of
-from backend.orm import Auftrag, AuftragStatus, User
+from backend.orm import Auftrag, AuftragStatus, SkuDimension, User
 from backend.schemas import (
     DailyLevelBucket,
     HeatmapCell,
     LevelBucket,
     ReportsAggregates,
 )
+from backend.work_time import effective_seconds
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -120,6 +121,47 @@ def _int_field(item: dict[str, Any], key: str) -> int:
     return 0
 
 
+async def _price_index(db: AsyncSession) -> dict[str, float]:
+    """Build a {fnsku|sku|ean → price_per_einheit_eur} lookup for the
+    Warenwert aggregation. One SELECT over the full `sku_dimensions`
+    table (small — hundreds of rows). Returns `{}` if the column does
+    not exist yet (pre-migration deploy window), so the rest of the
+    report still renders with `items_value_eur = 0`."""
+    from sqlalchemy.exc import ProgrammingError
+    try:
+        rows = (await db.execute(select(SkuDimension))).scalars().all()
+    except ProgrammingError:
+        await db.rollback()
+        return {}
+    out: dict[str, float] = {}
+    for sd in rows:
+        price = sd.price_per_einheit_eur
+        if price is None or price <= 0:
+            continue
+        p = float(price)
+        for k in (sd.fnskus or []):
+            out[str(k)] = p
+        for k in (sd.skus or []):
+            out[str(k)] = p
+        for k in (sd.eans or []):
+            out[str(k)] = p
+    return out
+
+
+def _item_price(it: dict[str, Any], price_by_key: dict[str, float]) -> Optional[float]:
+    """First-key-wins lookup mirroring the distributor's waterfall:
+    fnsku → sku → ean. Returns None if no key resolved to a row with a
+    known price."""
+    for key in ("fnsku", "sku", "ean"):
+        v = it.get(key)
+        if v is None or v == "":
+            continue
+        p = price_by_key.get(str(v))
+        if p is not None:
+            return p
+    return None
+
+
 @router.get("/aggregates", response_model=ReportsAggregates)
 async def get_aggregates(
     days: int = Query(30, ge=1, le=_MAX_DAYS),
@@ -130,6 +172,7 @@ async def get_aggregates(
     ),
     _me: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    schedule = Depends(load_work_schedule),
 ):
     """Aggregate completed Aufträge over the lookback window.
 
@@ -162,6 +205,18 @@ async def get_aggregates(
             )
         )
     ).scalars().all()
+
+    # Price lookup — built once per request from sku_dimensions. Same
+    # waterfall as the distributor (fnsku → sku → ean).
+    price_by_key = await _price_index(db)
+
+    # KPI roll-ups for the v2.4 Berichte redesign.
+    articles_total = 0
+    units_total = 0
+    items_with_price = 0
+    items_value_eur = 0.0
+    cost_per_level: dict[int, float] = defaultdict(float)
+    effective_hours_total = 0.0
 
     # Per-level running totals — distinct-auftrag count needs a set so
     # the same Auftrag with 3 Thermo items only counts once for L1.
@@ -213,10 +268,27 @@ async def get_aggregates(
             auftraege_per_level[lvl].add(row.id)
             item_units_sum += u
 
+            # KPI accumulators.
+            articles_total += 1
+            units_total += u
+            unit_price = _item_price(it, price_by_key)
+            if unit_price is not None:
+                items_with_price += 1
+                line_cost = u * unit_price
+                items_value_eur += line_cost
+                cost_per_level[lvl] += line_cost
+
             if row_date >= stack_cutoff:
                 daily_units[(date_iso, lvl)] += u
             if row_date >= rollen_cutoff and r_total > 0:
                 daily_rollen[(date_iso, lvl)] += r_total
+
+        # Productivity uses EFFECTIVE working seconds — lunch and
+        # non-working hours don't inflate the denominator.
+        if row.started_at is not None:
+            effective_hours_total += effective_seconds(
+                row.started_at, finished_at, schedule,
+            ) / 3600.0
 
         # Fallback if parser didn't populate totalUnits.
         if total_units <= 0:
@@ -231,10 +303,20 @@ async def get_aggregates(
             units=units_per_level.get(lvl, 0),
             rollen=rollen_per_level.get(lvl, 0),
             auftrag_count=len(auftraege_per_level.get(lvl, set())),
+            cost_eur=round(cost_per_level.get(lvl, 0.0), 2),
         )
         for lvl in range(1, LEVEL_COUNT + 1)
         if (level_filter is None or lvl in level_filter)
     ]
+
+    coverage_pct = (
+        (items_with_price / articles_total * 100.0)
+        if articles_total > 0 else 0.0
+    )
+    productivity = (
+        (units_total / effective_hours_total)
+        if effective_hours_total > 0 else 0.0
+    )
 
     # Fixed-grid heatmap — fill every day in the window so the frontend
     # renders a uniform grid without conditional cells.
@@ -282,4 +364,9 @@ async def get_aggregates(
         rollen_by_day=rollen_by_day,
         heatmap=heatmap,
         days=days,
+        articles_total=articles_total,
+        units_total=units_total,
+        items_value_eur=round(items_value_eur, 2),
+        items_value_coverage_pct=round(coverage_pct, 1),
+        productivity_units_per_hour=round(productivity, 1),
     )

@@ -1093,6 +1093,7 @@ function DimensionEditModal({ row, onClose, onSave, saving }: DimensionEditModal
     heightCm: row?.heightCm ?? '',
     weightKg: row?.weightKg ?? '',
     palletLoadMax: row?.palletLoadMax ?? '',
+    pricePerEinheitEur: row?.pricePerEinheitEur ?? '',
   });
 
   // Esc closes the modal
@@ -1130,6 +1131,18 @@ function DimensionEditModal({ row, onClose, onSave, saving }: DimensionEditModal
       }
       palletLoadMax = n;
     }
+    // Price is OPTIONAL — empty stays null. Reject only on non-empty
+    // non-negative float (accept 0 as "frei" / promotional).
+    let pricePerEinheitEur: number | null = null;
+    const rawPrice = String(form.pricePerEinheitEur || '').replace(',', '.').trim();
+    if (rawPrice) {
+      const n = parseFloat(rawPrice);
+      if (!isFinite(n) || n < 0) {
+        alert('Preis muss eine nicht-negative Zahl sein (oder leer lassen).');
+        return;
+      }
+      pricePerEinheitEur = n;
+    }
     onSave({
       fnskus, skus, eans,
       title: form.title || null,
@@ -1138,6 +1151,7 @@ function DimensionEditModal({ row, onClose, onSave, saving }: DimensionEditModal
       heightCm: parseFloat(String(form.heightCm)),
       weightKg: parseFloat(String(form.weightKg)),
       palletLoadMax,
+      pricePerEinheitEur,
     });
   };
 
@@ -1184,6 +1198,11 @@ function DimensionEditModal({ row, onClose, onSave, saving }: DimensionEditModal
                       value={form.palletLoadMax}
                       onChange={(v) => setForm({ ...form, palletLoadMax: v })}
                       placeholder="z. B. 79 (leer lassen wenn unbekannt)" />
+          <FieldInput label="Preis je VPE (EUR)"
+                      type="number" step="0.01"
+                      value={form.pricePerEinheitEur}
+                      onChange={(v) => setForm({ ...form, pricePerEinheitEur: v })}
+                      placeholder="Warenwert je Einheit" />
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 20, justifyContent: 'flex-end' }}>
           <button type="button" onClick={onClose} style={smallBtn}>Abbrechen</button>
