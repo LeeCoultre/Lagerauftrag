@@ -19,6 +19,7 @@ from datetime import datetime, time as time_t
 from typing import Any, Optional
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum as SAEnum,
@@ -26,6 +27,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     Time,
@@ -441,3 +443,96 @@ class WorkSchedule(Base):
             f"break {self.break_start}–{self.break_end} "
             f"days={self.working_days} tz={self.timezone_name}>"
         )
+
+
+# ─── market_searches / market_products ───────────────────────────────
+# External Amazon.de market analysis. One MarketSearch row = one cached
+# call to a third-party search provider (RainforestAPI by default);
+# children rows live in market_products. Cache TTL is enforced in the
+# router via `fetched_at > now() - interval '24h'` — not as a DB CHECK,
+# because we want to keep historical rows for audit/debug.
+
+class MarketSearch(Base):
+    __tablename__ = "market_searches"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    marketplace: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default=text("'de'")
+    )
+    provider: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'rainforest'")
+    )
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    result_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # The provider's untouched response body. Stored so a future schema
+    # change in market_products can be re-derived without another API call.
+    raw_payload: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_market_searches_query_recent",
+            "query", "marketplace", text("fetched_at DESC"),
+        ),
+        Index("idx_market_searches_fetched", text("fetched_at DESC")),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<MarketSearch {self.query!r} [{self.marketplace}] "
+            f"n={self.result_count}>"
+        )
+
+
+class MarketProduct(Base):
+    __tablename__ = "market_products"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    search_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("market_searches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    asin: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    seller: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    brand: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    price_cents: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default=text("'EUR'")
+    )
+    rating: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=2, scale=1), nullable=True
+    )
+    reviews_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_prime: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    is_sponsored: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    __table_args__ = (
+        Index("idx_market_products_search_position", "search_id", "position"),
+        Index("idx_market_products_asin", "asin"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MarketProduct #{self.position} {self.asin or '-'} {self.title[:40]!r}>"

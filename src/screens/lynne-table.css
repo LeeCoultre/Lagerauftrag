@@ -165,6 +165,19 @@
   min-width: 0;
 }
 
+/* ─── Marktanalyse grid — 7-column Amazon search result row ─────
+   Position · Title (2-line clamp) · Seller/Brand · Price · Rating ·
+   Reviews · external-link icon. Numeric columns are right-aligned via
+   the row markup using .lt-col-num. */
+
+[data-screen="lynne-table"] .lt-grid-marktanalyse {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 160px 110px 92px 110px 40px;
+  column-gap: var(--lt-col-gap);
+  align-items: center;
+  min-width: 0;
+}
+
 /* Order-trigger chip — small state pill in the "Bestellung" column.
    urgent → red, ready → accent/orange, wait → grey faint, ok → muted. */
 [data-screen="lynne-table"] .lt-order-chip {

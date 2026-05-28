@@ -656,6 +656,58 @@ class WorkSchedulePatch(BaseModel):
     timezone_name: Optional[str] = Field(default=None, max_length=50)
 
 
+# ─── Marktanalyse (Phase 1 — RainforestAPI cache) ────────────────────
+# Schemas for the third "Marktanalyse" tab in LYNNE Table. Field names
+# are camelCase on the wire so the frontend's snake↔camel converter
+# leaves them alone; explicit `to_read()` helpers map ORM rows manually.
+
+
+class MarketSearchRequest(BaseModel):
+    """POST /api/market/search body."""
+    query: str = Field(..., min_length=1, max_length=200)
+    forceRefresh: bool = False
+
+
+class MarketProductRead(BaseModel):
+    """One row in the Marktanalyse table."""
+    id: UUID
+    position: int
+    asin: Optional[str] = None
+    title: str
+    seller: Optional[str] = None
+    brand: Optional[str] = None
+    priceCents: Optional[int] = None
+    currency: str = "EUR"
+    rating: Optional[float] = None
+    reviewsCount: Optional[int] = None
+    url: str
+    imageUrl: Optional[str] = None
+    isPrime: Optional[bool] = None
+    isSponsored: Optional[bool] = None
+
+
+class MarketSearchSummary(BaseModel):
+    """Lightweight row for GET /api/market/searches — no products payload."""
+    id: UUID
+    query: str
+    marketplace: str
+    provider: str
+    fetchedAt: datetime
+    resultCount: int
+
+
+class MarketSearchRead(BaseModel):
+    """POST /api/market/search response."""
+    id: UUID
+    query: str
+    marketplace: str
+    provider: str
+    fetchedAt: datetime
+    resultCount: int
+    fromCache: bool
+    products: list[MarketProductRead] = Field(default_factory=list)
+
+
 class ReportsAggregates(BaseModel):
     """Server-side aggregates for the Berichte analytics widgets.
     The 4 sections (Format-Verteilung, Aktivität-Heatmap, Level-Stack,

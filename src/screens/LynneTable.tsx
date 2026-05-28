@@ -45,6 +45,7 @@ import {
 } from '@/marathonApi';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useMe } from '@/hooks/useMe';
+import Marktanalyse from './Marktanalyse';
 import type {
   LynneAsinGroup,
   LynneCatalog,
@@ -1653,14 +1654,15 @@ function VerkaufeKpiChart({ total, perPeriod, mode }: {
 }
 
 
-/* ─── Tab bar — switches between Katalog and Verkäufe views ─────── */
+/* ─── Tab bar — switches between Katalog, Verkäufe and Marktanalyse views ── */
 
-type View = 'katalog' | 'verkaeufe';
+type View = 'katalog' | 'verkaeufe' | 'marktanalyse';
 
 function TabBar({ value, onChange }: { value: View; onChange: (v: View) => void }) {
   const tabs: { id: View; label: string }[] = [
-    { id: 'katalog',   label: 'Katalog' },
-    { id: 'verkaeufe', label: 'Verkäufe' },
+    { id: 'katalog',      label: 'Katalog' },
+    { id: 'verkaeufe',    label: 'Verkäufe' },
+    { id: 'marktanalyse', label: 'Marktanalyse' },
   ];
   return (
     <div style={{
@@ -3626,7 +3628,23 @@ export default function LynneTable() {
           </div>
         )}
 
-        {/* ── TOOLBAR — common to both views ───────────────────── */}
+        {/* On Marktanalyse — just the TabBar, then the Marktanalyse screen
+            renders its own header. No catalog identity card, no KPI hero,
+            and the shared toolbar below is suppressed (it filters the
+            local catalog, not Amazon results). */}
+        {view === 'marktanalyse' && (
+          <div style={{
+            animation: 'lt-rise-local 480ms cubic-bezier(0.16,1,0.3,1) backwards',
+            display: 'flex',
+            alignItems: 'flex-start',
+            padding: '8px 10px 0',
+          }}>
+            <TabBar value={view} onChange={setView} />
+          </div>
+        )}
+
+        {/* ── TOOLBAR — catalog / Verkäufe filters (hidden on Marktanalyse) */}
+        {view !== 'marktanalyse' && (
         <div style={{
           animation: 'lt-rise-local 480ms cubic-bezier(0.16,1,0.3,1) 80ms backwards',
         }}>
@@ -3723,6 +3741,7 @@ export default function LynneTable() {
             </div>
           )}
         </div>
+        )}
 
         {view === 'katalog' && (
         <div style={{ display: 'contents' }}>
@@ -3818,6 +3837,14 @@ export default function LynneTable() {
             ))}
           </div>
         </div>
+        )}
+
+        {view === 'marktanalyse' && (
+          <div style={{
+            animation: 'lt-rise-local 480ms cubic-bezier(0.16,1,0.3,1) 120ms backwards',
+          }}>
+            <Marktanalyse />
+          </div>
         )}
       </main>
 

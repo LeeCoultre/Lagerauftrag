@@ -646,3 +646,47 @@ export interface LynneAsinBatchPatch {
 export interface LynneAsinRename {
   newAsin: string;
 }
+
+/* ─── Marktanalyse (third-party Amazon.de search cache) ──────────── */
+
+export interface MarketSearchRequest {
+  query: string;
+  forceRefresh?: boolean;
+}
+
+export interface MarketProduct {
+  id: UUID;
+  position: number;
+  asin?: string | null;
+  title: string;
+  seller?: string | null;
+  brand?: string | null;
+  priceCents?: number | null;
+  currency: string;
+  rating?: number | null;
+  reviewsCount?: number | null;
+  url: string;
+  imageUrl?: string | null;
+  isPrime?: boolean | null;
+  isSponsored?: boolean | null;
+}
+
+export interface MarketSearchSummary {
+  id: UUID;
+  query: string;
+  marketplace: string;
+  provider: string;
+  fetchedAt: ISODateString;
+  resultCount: number;
+}
+
+export interface MarketSearchResponse {
+  id: UUID;
+  query: string;
+  marketplace: string;
+  provider: string;
+  fetchedAt: ISODateString;
+  resultCount: number;
+  fromCache: boolean;
+  products: MarketProduct[];
+}

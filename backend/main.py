@@ -18,6 +18,7 @@ from .routers import (
     exports,
     history,
     lynne,
+    market_analysis,
     packing,
     pallet_claims,
     reports,
@@ -105,6 +106,7 @@ app.include_router(activity.router)   # /api/activity/live, /api/activity/shift
 app.include_router(exports.router)    # /api/exports/auftraege.xlsx
 app.include_router(reports.router)    # /api/reports/aggregates
 app.include_router(lynne.router)      # /api/lynne/products
+app.include_router(market_analysis.router)  # /api/market/search, /api/market/searches
 app.include_router(work_schedule.router)  # /api/work-schedule, /api/admin/work-schedule
 
 

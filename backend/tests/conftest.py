@@ -98,7 +98,8 @@ async def clean_db():
     async with engine.begin() as conn:
         await conn.execute(text(
             "TRUNCATE pallet_claims, audit_log, auftraege, users, "
-            "sku_dimensions, lynne_products RESTART IDENTITY CASCADE"
+            "sku_dimensions, lynne_products, market_products, "
+            "market_searches RESTART IDENTITY CASCADE"
         ))
     yield
     # Drop any auth overrides set during the test.

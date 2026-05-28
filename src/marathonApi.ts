@@ -37,6 +37,9 @@ import type {
   LynneProductCreate,
   LynneProductRead,
   LynneVariantPatch,
+  MarketSearchRequest,
+  MarketSearchResponse,
+  MarketSearchSummary,
   ReportsAggregates,
   ReportsQuery,
   SearchQuery,
@@ -273,6 +276,22 @@ export const adminDeleteLynneProduct = (id: string): Promise<null> =>
 
 export const adminRenameLynneAsin = (asin: string, payload: LynneAsinRename): Promise<LynneAsinGroup> =>
   call('PATCH', `/api/lynne/admin/asins/${encodeURIComponent(asin)}/rename`, payload);
+
+/* ─── Marktanalyse (beta — third-party Amazon search via RainforestAPI)
+ * Backend caches results 24h per (query, marketplace). `forceRefresh:true`
+ * bypasses the cache and writes an AuditLog row; backend throttles to
+ * one force-refresh per user per 60s (429 on second hit). */
+
+export const searchMarket = (
+  query: string,
+  forceRefresh = false,
+): Promise<MarketSearchResponse> => {
+  const payload: MarketSearchRequest = { query, forceRefresh };
+  return call('POST', '/api/market/search', payload);
+};
+
+export const getRecentMarketSearches = (limit = 20): Promise<MarketSearchSummary[]> =>
+  call('GET', `/api/market/searches?limit=${limit}`);
 
 /* ─── Reports (Berichte analytics aggregates) ─────────────────────────
  * Backend aggregates parsed blobs over a lookback window (≤90 days) and
