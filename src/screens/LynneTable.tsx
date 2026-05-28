@@ -3219,7 +3219,7 @@ export default function LynneTable() {
         return saved as SalesMode;
       }
     } catch { /* ignore */ }
-    return '4w';
+    return '8w';
   });
   useEffect(() => {
     try { localStorage.setItem('marathon.lynne.salesMode.v1', salesMode); } catch { /* ignore */ }

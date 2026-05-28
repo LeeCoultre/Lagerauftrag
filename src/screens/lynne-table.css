@@ -165,17 +165,203 @@
   min-width: 0;
 }
 
-/* ─── Marktanalyse grid — 7-column Amazon search result row ─────
-   Position · Title (2-line clamp) · Seller/Brand · Price · Rating ·
-   Reviews · external-link icon. Numeric columns are right-aligned via
-   the row markup using .lt-col-num. */
+/* ─── Marktanalyse grid — 9-column Amazon search result row ─────
+   Position · Image · Title (2-line clamp + ASIN row) · Brand · Price ·
+   vs-Median chip · Rating (number + 5-segment bar) · Reviews · ↗ icon.
+   Numeric columns right-align via .lt-col-num on the cell. */
 
 [data-screen="lynne-table"] .lt-grid-marktanalyse {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 160px 110px 92px 110px 40px;
+  grid-template-columns: 36px 56px minmax(0, 1fr) 130px 100px 90px 110px 90px 40px;
   column-gap: var(--lt-col-gap);
   align-items: center;
   min-width: 0;
+}
+
+/* Product image cell — 48×48 thumbnail, falls back to a circular
+   brand-initial badge on missing/broken imageUrl. */
+[data-screen="lynne-table"] .lt-mkt-img {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  object-fit: contain;
+  background: #FFFFFF;
+  border: 1px solid var(--lt-border, rgba(15, 23, 42, 0.08));
+}
+[data-screen="lynne-table"] .lt-mkt-img-fallback {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.04);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 17px/1 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--text-mid, #475569);
+}
+
+/* Filter bar pill — segmented controls + toggle pills above the
+   results table. Background tints when active, accent ring on
+   hover. */
+[data-screen="lynne-table"] .lt-mkt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid transparent;
+  font: 600 11.5px/1 var(--font-ui, ui-sans-serif);
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+  white-space: nowrap;
+  user-select: none;
+}
+[data-screen="lynne-table"] .lt-mkt-pill:hover {
+  color: var(--text-primary);
+  border-color: rgba(15, 23, 42, 0.08);
+}
+[data-screen="lynne-table"] .lt-mkt-pill[data-active="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Brand-strip clickable row — bar track + name + count. Active state
+   matches the filter pill. */
+[data-screen="lynne-table"] .lt-mkt-brand-row {
+  all: unset;
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 160ms ease;
+}
+[data-screen="lynne-table"] .lt-mkt-brand-row:hover {
+  background: rgba(15, 23, 42, 0.04);
+}
+[data-screen="lynne-table"] .lt-mkt-brand-row[data-active="true"] {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Top-Pick pill — purple tone, sits next to Prime/Anzeige in the
+   title row. Reuses .lt-pill base. */
+[data-screen="lynne-table"] .lt-pill[data-channel="TOP"] {
+  color: #6D28D9;
+  background: color-mix(in srgb, #A78BFA 18%, transparent);
+}
+
+/* LYNNE accent — pleasant violet, scoped to Marktanalyse own-brand
+   styling so we don't override the global Marathon accent (orange by
+   default). All LYNNE-specific colors below reference this variable. */
+[data-screen="lynne-table"] {
+  --lynne-accent: #8B5CF6;       /* violet-500, vivid but not loud */
+  --lynne-accent-dark: #6D28D9;  /* violet-700, for text on tinted bg */
+}
+
+/* LYNNE — our own brand. Strong violet accent, filled background,
+   shown wherever a competitor card might surface us in the market
+   analysis. The visual goal is "instantly findable" without being
+   shouty. */
+[data-screen="lynne-table"] .lt-pill[data-channel="LYNNE"] {
+  color: #FFFFFF;
+  background: var(--lynne-accent);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* Product-row subtle tint — no left border line, just a faint violet
+   wash on the leading edge of the row so LYNNE products stand out
+   within the (already accent-bordered) LYNNE container without a
+   second strong line. */
+[data-screen="lynne-table"] .lt-mkt-row-lynne {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--lynne-accent) 8%, #FFFFFF) 0%,
+    #FFFFFF 14%
+  ) !important;
+}
+
+/* Brand cell — LYNNE products get a violet pill in the brand
+   column (instead of plain text). Non-LYNNE brands stay readable
+   text. */
+[data-screen="lynne-table"] .lt-mkt-brand-lynne {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lynne-accent) 14%, transparent);
+  color: var(--lynne-accent-dark);
+  font-weight: 700;
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* BrandStrip — LYNNE bar uses the violet for both fill and label,
+   distinguishing "our brand" from competitor brands. */
+[data-screen="lynne-table"] .lt-mkt-brand-row[data-lynne="true"] .lt-bar-fill {
+  background: var(--lynne-accent) !important;
+}
+
+/* ─── Marktanalyse v3 — format groups + LYNNE container ───────────
+   Products are grouped into collapsible containers by their physical
+   roll format ("57×18×12 mm"). LYNNE-branded products live in a
+   separate pinned container at the top with own-brand accent styling. */
+
+/* LYNNE pinned container — full violet border, gradient bg, never
+   blends in with format groups around it. */
+[data-screen="lynne-table"] .lt-mkt-lynne-container {
+  border: 2px solid color-mix(in srgb, var(--lynne-accent) 60%, transparent) !important;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--lynne-accent) 10%, #FFFFFF) 0%,
+    #FFFFFF 60%
+  ) !important;
+}
+
+/* Format-group + LYNNE header — clickable, full-width, keyboard-able. */
+[data-screen="lynne-table"] .lt-mkt-group-header {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 22px;
+  cursor: pointer;
+  border-radius: 18px;
+  transition: background 160ms ease;
+  width: 100%;
+  box-sizing: border-box;
+}
+[data-screen="lynne-table"] .lt-mkt-group-header:hover {
+  background: rgba(15, 23, 42, 0.03);
+}
+[data-screen="lynne-table"] .lt-mkt-group-header:focus-visible {
+  outline: 2px solid var(--accent, #FF5B1F);
+  outline-offset: -2px;
+}
+
+/* LYNNE header gets a subtle violet hover (matches own-brand theme). */
+[data-screen="lynne-table"] .lt-mkt-lynne-container .lt-mkt-group-header:hover {
+  background: color-mix(in srgb, var(--lynne-accent) 6%, transparent);
+}
+
+/* Chevron — rotates 0°→90° on expand. Pattern matches BetaArticleRow
+   in Pruefen.tsx. */
+[data-screen="lynne-table"] .lt-mkt-chevron {
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  flex-shrink: 0;
+  color: var(--text-mid, #475569);
+}
+[data-screen="lynne-table"] .lt-mkt-chevron[data-expanded="true"] {
+  transform: rotate(90deg);
 }
 
 /* Order-trigger chip — small state pill in the "Bestellung" column.
