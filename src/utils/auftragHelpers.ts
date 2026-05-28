@@ -873,6 +873,56 @@ export function primaryLevel(items) {
   return parseInt(sorted[0][0], 10);
 }
 
+/* ─── Short pallet content label for external logistics (≤32 chars) ─────
+   Produces a 1- or 2-word label describing the dominant content of a
+   pallet — intended for paste into the eLogistics dashboard's pallet-name
+   field (32-char limit). One level dominant (≥70% units) → single word;
+   otherwise the two top levels by units, joined with " + ". Level 1
+   (Thermorollen) is rendered as "Bonrollen" per warehouse-floor wording. */
+const PALLET_LABEL_BY_LEVEL: Record<number, string> = {
+  1: 'Bonrollen',
+  2: 'Veit',
+  3: 'ÖKO',
+  4: 'Klebeband',
+  5: 'Produktion',
+  6: 'Kernöl',
+  7: 'Tachorollen',
+};
+const PALLET_LABEL_MAX = 32;
+
+export function palletShortLabel(pallet) {
+  const items = pallet?.items || [];
+  if (!items.length) return '';
+
+  const byLevel: Record<number, number> = {};
+  for (const it of items) {
+    const lvl = getDisplayLevel(it);
+    byLevel[lvl] = (byLevel[lvl] || 0) + (it.units || 0);
+  }
+  const total = Object.values(byLevel).reduce((s, n) => s + n, 0);
+  if (!total) return '';
+
+  const sorted = (Object.entries(byLevel) as Array<[string, number]>)
+    .map(([l, u]) => ({ level: parseInt(l, 10), units: u, pct: u / total }))
+    .sort((a, b) => b.units - a.units);
+
+  const labelFor = (lvl: number) =>
+    PALLET_LABEL_BY_LEVEL[lvl] || LEVEL_META[lvl]?.name || `L${lvl}`;
+
+  const first = labelFor(sorted[0].level);
+  if (sorted.length === 1 || sorted[0].pct >= 0.7) {
+    return first.length <= PALLET_LABEL_MAX ? first : first.slice(0, PALLET_LABEL_MAX);
+  }
+
+  const second = labelFor(sorted[1].level);
+  const combined = `${first} + ${second}`;
+  if (combined.length <= PALLET_LABEL_MAX) return combined;
+
+  const remain = PALLET_LABEL_MAX - (first.length + 3); // " + "
+  if (remain >= 3) return `${first} + ${second.slice(0, remain)}`;
+  return first.slice(0, PALLET_LABEL_MAX);
+}
+
 /* ─── Einzelne-SKU distribution (V3 — water-fill) ────────────────────────
    SOP v1.1 — Phase 2 placement after Mixed-Boxes are fixed by Auftrag plan.
 

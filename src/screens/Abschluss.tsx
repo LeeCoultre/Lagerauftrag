@@ -26,7 +26,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useAppState } from '@/state.jsx';
 import {
   pruefenView, palletTimingRows, levelDistribution,
-  primaryLevel, LEVEL_META,
+  primaryLevel, palletShortLabel, LEVEL_META,
 } from '@/utils/auftragHelpers.js';
 import {
   Page, Topbar, StepperBar,
@@ -78,6 +78,11 @@ export default function AbschlussScreen() {
       bilanz,
       palletTimings:     palletTimingRows(pallets, current.palletTimings),
       levelDistribution: levelDistribution(pallets),
+      palletLabels:      pallets.map((p) => ({
+        id:    p.id,
+        level: primaryLevel(p.items) || 1,
+        label: palletShortLabel(p),
+      })),
       queueRemaining:    queue.length,
     };
   }, [current, queue]);
@@ -240,7 +245,7 @@ function BetaAbschluss({ data, onSaveAndNext }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onSaveAndNext]);
 
-  const { fba, destination, format, bilanz, stats, queueRemaining } = data;
+  const { fba, destination, format, bilanz, stats, queueRemaining, palletLabels } = data;
 
   return (
     <Page>
@@ -341,6 +346,29 @@ function BetaAbschluss({ data, onSaveAndNext }) {
                   />
                 ))}
                 <BetaBreakdownTotal bilanz={bilanz} />
+              </div>
+            </BetaWhitePanel>
+          </BetaPaperCard>
+        )}
+
+        {/* Etiketten — one short label per pallet for the eLogistics
+            dashboard (32-char pallet-name field). Click each to copy. */}
+        {palletLabels?.length > 0 && (
+          <BetaPaperCard>
+            <BetaWhitePanel padding="22px 26px">
+              <BetaEyebrow>Etiketten · eLogistics</BetaEyebrow>
+              <div style={{
+                marginTop: 14,
+                display: 'flex',
+                flexDirection: 'column',
+              }}>
+                {palletLabels.map((row, i) => (
+                  <BetaPalletLabelRow
+                    key={row.id}
+                    row={row}
+                    isFirst={i === 0}
+                  />
+                ))}
               </div>
             </BetaWhitePanel>
           </BetaPaperCard>
@@ -640,6 +668,86 @@ function BetaBreakdownRow({ row, isFirst }: { row: BreakdownBucket; isFirst: boo
         {formatEur(row.sum)}
       </span>
     </div>
+  );
+}
+
+/* One pallet → its short content label. Click to copy. Mirrors
+   BetaBreakdownRow geometry (color dot · pallet id · label · copy hint). */
+function BetaPalletLabelRow({ row, isFirst }: {
+  row: { id: string; level: number; label: string };
+  isFirst: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const meta = LEVEL_META[row.level] || LEVEL_META[1];
+  const onClick = () => {
+    if (!row.label) return;
+    copyToClipboard(row.label);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseDown={(e) => e.preventDefault()}
+      disabled={!row.label}
+      title={row.label ? (copied ? 'Kopiert' : 'Klick zum Kopieren') : undefined}
+      style={{
+        all: 'unset',
+        cursor: row.label ? 'pointer' : 'default',
+        display: 'grid',
+        gridTemplateColumns: '14px minmax(80px, auto) minmax(0, 1fr) auto',
+        gap: 16,
+        alignItems: 'center',
+        padding: '14px 8px',
+        marginLeft: -8,
+        marginRight: -8,
+        borderTop: isFirst ? 'none' : `1px solid ${T.border.subtle}`,
+        borderRadius: 8,
+        background: copied ? T.status.success.bg : 'transparent',
+        transition: 'background 220ms ease',
+      }}
+    >
+      <span aria-hidden style={{
+        width: 10, height: 10,
+        borderRadius: '50%',
+        background: meta.color,
+      }} />
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.subtle,
+        letterSpacing: '0.04em',
+        whiteSpace: 'nowrap',
+      }}>
+        {row.id}
+      </span>
+      <span style={{
+        fontFamily: T.font.ui,
+        fontSize: 14.5,
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.primary,
+        letterSpacing: '-0.005em',
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}>
+        {row.label || '—'}
+      </span>
+      <span style={{
+        fontFamily: T.font.mono,
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: copied ? T.status.success.text : T.text.faint,
+        letterSpacing: '0.10em',
+        textTransform: 'uppercase',
+        whiteSpace: 'nowrap',
+      }}>
+        {copied ? '✓ Kopiert' : `${row.label.length}/32`}
+      </span>
+    </button>
   );
 }
 
